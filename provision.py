@@ -2,9 +2,7 @@
 """Create an exe.dev VM running a Hermes agent with inference, browser, Hub, and Shelley access."""
 
 import asyncio
-import json
 import os
-import secrets
 import subprocess
 import sys
 import time
@@ -27,10 +25,10 @@ def run(cmd, *, check=True, capture=True, timeout=60, input=None):
         capture_output=capture, text=True, timeout=timeout, input=input,
     )
     if check and r.returncode != 0:
-        print(f"FAILED: {cmd}", file=sys.stderr)
+        msg = f"Command failed: {cmd}"
         if r.stderr:
-            print(r.stderr, file=sys.stderr)
-        sys.exit(1)
+            msg += f"\n{r.stderr}"
+        raise RuntimeError(msg)
     return r.stdout.strip() if capture else None
 
 
@@ -104,8 +102,6 @@ SETUP_SCRIPT = r"""
 set -eu
 
 AGENT_NAME="{name}"
-HUB_PROXY_TOKEN="{hub_proxy_token}"
-TG_PROXY_TOKEN="{tg_proxy_token}"
 
 # --- 1. Install dependencies + Node 22 (required for browser tools) ---
 # Force apt to use IPv4 — exe.dev VMs often have broken IPv6 routes
@@ -174,17 +170,15 @@ platforms:
     enabled: true
     extra:
       agent_id: "$AGENT_NAME"
-      agent_secret: "proxy-managed"  # dummy — real secret injected by credential proxy
-      ws_url: "wss://proxy.int.exe.xyz/hub/ws/$AGENT_NAME"
-      api_base: "https://proxy.int.exe.xyz/hub"
-      proxy_token: "$HUB_PROXY_TOKEN"
+      agent_secret: "integration-managed"
+      ws_url: "wss://hub-{name}.int.exe.xyz/oc/brain/agents/$AGENT_NAME/ws"
+      api_base: "https://hub-{name}.int.exe.xyz/oc/brain"
 {telegram_config}
 mcp_servers:
   hub:
-    url: "https://proxy.int.exe.xyz/hub/mcp"
+    url: "https://hub-{name}.int.exe.xyz/oc/brain/mcp"
     headers:
       X-Agent-ID: "$AGENT_NAME"
-      X-Proxy-Token: "$HUB_PROXY_TOKEN"
     tools:
       include: ["hub"]
       prompts: false
@@ -357,7 +351,6 @@ ExecStart=/home/exedev/bin/bootstrap.sh
 Restart=on-failure
 RestartSec=5
 Environment=AGENT_NAME=$AGENT_NAME
-Environment=HUB_PROXY_TOKEN=$HUB_PROXY_TOKEN
 
 [Install]
 WantedBy=multi-user.target
@@ -371,39 +364,21 @@ echo "--- Setup complete ---"
 """
 
 
-def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <agent-name> <user-email> [telegram-bot-token] [telegram-username]")
-        sys.exit(1)
-
-    name = sys.argv[1]
-    email = sys.argv[2]
-    telegram_bot_token = sys.argv[3] if len(sys.argv) > 3 else ""
-    telegram_username = sys.argv[4] if len(sys.argv) > 4 else ""
-
-    # 1. Generate proxy tokens
-    hub_proxy_token = secrets.token_urlsafe(32)
-    tg_proxy_token = secrets.token_urlsafe(32) if telegram_bot_token else ""
-    print(f"Generated proxy tokens for '{name}'")
-
-    # 2. Register agent on Hub
+def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
+    """Provision a Hermes agent on exe.dev. Returns result dict."""
+    # 1. Register agent on Hub
     print("Registering agent on Hub...")
-    try:
-        hub_agent_id, hub_secret = register_hub_agent(
-            name,
-            description=f"Hermes agent on exe.dev ({name})",
-        )
-        print(f"  Hub agent: {hub_agent_id}")
-    except Exception as e:
-        print(f"ERROR: Hub registration failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    hub_agent_id, hub_secret = register_hub_agent(
+        name,
+        description=f"Hermes agent on exe.dev ({name})",
+    )
+    print(f"  Hub agent: {hub_agent_id}")
 
-    # 3. Save credentials for the proxy
-    save_agent_credentials(name, hub_secret, hub_proxy_token, tg_proxy_token,
-                           telegram_bot_token)
-    print("  Credentials saved to agents.json")
+    # 2. Save credentials to DB
+    save_agent_credentials(name, hub_secret, "", "", telegram_bot_token)
+    print("  Credentials saved to DB")
 
-    # 4. Rename Telegram bot to match agent name
+    # 3. Rename Telegram bot to match agent name
     if telegram_bot_token:
         print(f"Renaming Telegram bot to '{name}'...")
         try:
@@ -419,7 +394,7 @@ def main():
         except Exception as e:
             print(f"  Warning: could not rename bot: {e}")
 
-    # 5. Resolve Telegram username → numeric ID (for home_channel)
+    # 4. Resolve Telegram username → numeric ID (for home_channel)
     telegram_user_id = ""
     owner_name = ""
     if telegram_username and telegram_bot_token:
@@ -434,7 +409,7 @@ def main():
         except Exception as e:
             print(f"  Warning: could not resolve @{telegram_username}: {e}")
 
-    # 6. Build Telegram config blocks (empty if no bot token)
+    # 5. Build Telegram config blocks (empty if no bot token)
     if telegram_bot_token:
         home_channel_block = ""
         if telegram_user_id:
@@ -442,15 +417,16 @@ def main():
                 '    home_channel:\n'
                 f'      chat_id: "{telegram_user_id}"\n'
                 '      name: "Home"\n'
+                '      platform: telegram\n'
             )
         telegram_config = (
             '  telegram:\n'
             '    enabled: true\n'
-            '    token: "$TG_PROXY_TOKEN"\n'
+            '    token: "unused"\n'
             + home_channel_block +
             '    extra:\n'
-            '      base_url: "https://proxy.int.exe.xyz/telegram/"\n'
-            '      base_file_url: "https://proxy.int.exe.xyz/telegram-file/"\n'
+            f'      base_url: "https://tg-{name}.int.exe.xyz"\n'
+            f'      base_file_url: "https://tg-{name}.int.exe.xyz"\n'
         )
         soul_telegram = (
             '- **Telegram** — how humans reach you. Anyone can message your bot.\n'
@@ -462,39 +438,57 @@ def main():
         telegram_config = ""
         soul_telegram = ""
 
-    # 5. Create VM
+    # 6. Create VM
     print(f"Creating VM '{name}'...")
     out = run(f"ssh exe.dev new --name={name} --env AGENT_NAME={name}", timeout=30)
     print(f"  {out}")
 
-    # 6. Tag VM
+    # 7. Tag VM (shared integrations: inference, tracing, memory)
     print(f"Tagging VM with '{TAG}', 'langfuse', and 'honcho'...")
     run(f"ssh exe.dev tag {name} {TAG}", timeout=10)
     run(f"ssh exe.dev tag {name} langfuse", timeout=10)
     run(f"ssh exe.dev tag {name} honcho", timeout=10)
 
-    # 7. Enable email
+    # 8. Create per-agent integrations (zero secrets on VM)
+    print(f"Creating per-agent Hub integration...")
+    run(
+        f"ssh exe.dev integrations add http-proxy"
+        f" --name=hub-{name}"
+        f" --target=https://admin.slate.ceo"
+        f" --header=X-Agent-Secret:{hub_secret}"
+        f" --attach=vm:{name}",
+        timeout=15,
+    )
+    if telegram_bot_token:
+        print(f"Creating per-agent Telegram integration...")
+        run(
+            f"ssh exe.dev integrations add http-proxy"
+            f" --name=tg-{name}"
+            f" --target=https://proxy.slate.ceo"
+            f" --header=X-Bot-Token:{telegram_bot_token}"
+            f" --attach=vm:{name}",
+            timeout=15,
+        )
+
+    # 9. Enable email
     print("Enabling inbound email...")
     run(f"ssh exe.dev share receive-email {name} on", timeout=10)
 
-    # 8. Share VM with user (gives Shelley + web access)
+    # 10. Share VM with user
     print(f"Sharing VM with {email}...")
     run(f"ssh exe.dev share add {name} {email}", timeout=10)
 
-    # 9. Wait for SSH
+    # 11. Wait for SSH
     print("Waiting for SSH...")
     if not wait_for_ssh(name):
-        print("ERROR: VM not reachable via SSH after 60s", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"VM '{name}' not reachable via SSH after 60s")
     print("  SSH ready")
 
-    # 10. Run setup
+    # 12. Run setup
     print("Running setup (this takes a few minutes)...")
     script = (
         SETUP_SCRIPT
         .replace("{name}", name)
-        .replace("{hub_proxy_token}", hub_proxy_token)
-        .replace("{tg_proxy_token}", tg_proxy_token)
         .replace("{telegram_config}", telegram_config)
         .replace("{soul_telegram}", soul_telegram)
         .replace("{owner_email}", email)
@@ -502,12 +496,51 @@ def main():
     )
     ssh_vm(name, script, timeout=600)
 
+    return {
+        "name": name,
+        "url": f"https://{name}.exe.xyz",
+        "shelley": f"https://{name}.shelley.exe.xyz/",
+        "ssh": f"ssh {name}.exe.xyz",
+        "hub_agent_id": hub_agent_id,
+        "telegram_configured": bool(telegram_bot_token),
+    }
+
+
+def destroy_agent(name):
+    """Delete a VM, its integrations, and DB record. Returns result dict."""
+    from db import delete_agent as db_delete_agent
+    print(f"Removing per-agent integrations...")
+    run(f"ssh exe.dev integrations remove hub-{name}", timeout=15, check=False)
+    run(f"ssh exe.dev integrations remove tg-{name}", timeout=15, check=False)
+    print(f"Deleting VM '{name}'...")
+    run(f"ssh exe.dev rm {name}", timeout=30)
+    print(f"  VM deleted")
+    db_delete_agent(name)
+    print(f"  DB record removed")
+    return {"name": name, "deleted": True}
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <agent-name> <user-email> [telegram-bot-token] [telegram-username]")
+        sys.exit(1)
+
+    try:
+        result = provision_agent(
+            sys.argv[1], sys.argv[2],
+            sys.argv[3] if len(sys.argv) > 3 else "",
+            sys.argv[4] if len(sys.argv) > 4 else "",
+        )
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
     print()
-    print(f"Done! VM: https://{name}.exe.xyz")
-    print(f"  Shelley: https://{name}.shelley.exe.xyz/")
-    print(f"  SSH:     ssh {name}.exe.xyz")
-    print(f"  Hub:     agent '{hub_agent_id}' on Slate Agent Hub")
-    if telegram_bot_token:
+    print(f"Done! VM: {result['url']}")
+    print(f"  Shelley: {result['shelley']}")
+    print(f"  SSH:     {result['ssh']}")
+    print(f"  Hub:     agent '{result['hub_agent_id']}' on Slate Agent Hub")
+    if result["telegram_configured"]:
         print(f"  Telegram: configured (bot token proxied)")
 
 

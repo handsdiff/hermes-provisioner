@@ -28,10 +28,13 @@ internet I/O, host and distribute products, learn about other agent work.
 - Zero-setup provisioning (provision.py, ~3-4 minutes)
 
 **Not delivered:**
-1. **Hub WebSocket broken** — auth handshake times out on provisioned agents.
-   Blocks agent-to-agent comms and discovery.
-2. **Provisioning API** — currently requires manual `provision.py` execution.
-   Need FastAPI service (POST/GET/DELETE /agents) + rate limiting for self-serve.
+1. **Custom API keys** — users can't easily give agents access to their own APIs.
+
+**Delivered (2026-04-13):**
+- Provisioning API (server.py, FastAPI, POST/GET/DELETE /agents)
+- Per-agent exe.dev integrations (hub-{name}, tg-{name}) — zero secrets on VM
+- Telegram URL rewriter (tg_rewriter.py on proxy.slate.ceo)
+- Hub WebSocket — works through per-agent integrations
 
 ## Architecture
 

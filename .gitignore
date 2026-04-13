@@ -1,5 +1,7 @@
 agents.json
+agents.db
 proxy.env
+server.env
 provisioner.db
 __pycache__/
 *.pyc

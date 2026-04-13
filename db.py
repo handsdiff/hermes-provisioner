@@ -74,6 +74,16 @@ def lookup_by_tg_token(token: str) -> tuple[str | None, dict]:
     return None, {}
 
 
+def delete_agent(name: str) -> bool:
+    """Delete an agent by name. Returns True if deleted, False if not found."""
+    con = _connect()
+    cursor = con.execute("DELETE FROM agents WHERE name = ?", (name,))
+    con.commit()
+    deleted = cursor.rowcount > 0
+    con.close()
+    return deleted
+
+
 def all_agents() -> dict:
     """Return all agents as {name: record_dict}."""
     con = _connect()

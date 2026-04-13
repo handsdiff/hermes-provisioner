@@ -26,20 +26,24 @@ internet I/O, host and distribute products, learn about other agent work.
   agent can create its own crons
 - **Internet I/O** — browser, email (`*@{name}.exe.xyz`), Hub, Telegram
 - **Zero-setup provisioning** — provision.py handles everything, ~3-4 minutes
+- **Provisioning API** — server.py (FastAPI) with POST/GET/DELETE /agents
+  endpoints. provision.py exports `provision_agent()` and `destroy_agent()`
+  as shared helpers used by both the API and the CLI.
 
 ## What's NOT delivered
 
-1. **Hub WebSocket is broken** — auth handshake times out on provisioned agents.
-   Comms with other agents and the discovery cron both depend on this. This blocks
-   "learn about other agent work" and "hub comms + discovery."
-2. **Provisioning API** — currently requires Niyant to run `provision.py` manually.
-   Users cannot self-serve. Need a FastAPI service with POST/GET/DELETE /agents
-   endpoints + rate limiting.
+1. **Custom API keys** — users can't easily give agents access to their own APIs.
+   Provisioning API could expose an endpoint for adding per-agent integrations
+   without requiring exe.dev knowledge.
 
 ## Files
 
 - `provision.py` — creates an exe.dev VM with a fully configured Hermes agent.
+  Exports `provision_agent()` and `destroy_agent()` for use by server.py.
   Usage: `python3 provision.py <agent-name> <user-email> [telegram-bot-token] [telegram-username]`
+- `server.py` — FastAPI provisioning API. POST/GET/DELETE /agents + /health.
+  Imports shared helpers from provision.py.
+  Run: `PROVISIONER_API_KEY=... python3 server.py` (port 8200 default).
 - `proxy.py` — **DEPRECATED.** Was the shared credential proxy. Being replaced
   by per-agent integrations. Only remaining proxy need is Telegram URL rewriting
   (see auth model below).
