@@ -218,6 +218,9 @@ changes, because manual fixes don't feed back into the script.
 
 ### Near-term
 
+- **Hindsight integration** — Honcho handles relationship-based memory, but
+  knowledge-based memory and large context ingestion need Hindsight. Already
+  running at `hindsight.exe.xyz`, needs to be wired into provisioning.
 - **Custom API keys** — users can't easily give agents access to their own APIs.
   Provisioning API could expose an endpoint for adding per-agent integrations
   without requiring exe.dev knowledge.
