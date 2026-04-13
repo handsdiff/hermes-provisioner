@@ -1,6 +1,5 @@
-"""SQLite agent database — replaces agents.json."""
+"""SQLite agent database."""
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -50,29 +49,6 @@ def get_agent(name: str) -> dict | None:
     return dict(row) if row else None
 
 
-def lookup_by_hub_token(token: str) -> tuple[str | None, dict]:
-    """Find agent by hub_proxy_token."""
-    con = _connect()
-    row = con.execute(
-        "SELECT * FROM agents WHERE hub_proxy_token = ?", (token,)
-    ).fetchone()
-    con.close()
-    if row:
-        return row["name"], dict(row)
-    return None, {}
-
-
-def lookup_by_tg_token(token: str) -> tuple[str | None, dict]:
-    """Find agent by tg_proxy_token."""
-    con = _connect()
-    row = con.execute(
-        "SELECT * FROM agents WHERE tg_proxy_token = ?", (token,)
-    ).fetchone()
-    con.close()
-    if row:
-        return row["name"], dict(row)
-    return None, {}
-
 
 def delete_agent(name: str) -> bool:
     """Delete an agent by name. Returns True if deleted, False if not found."""
@@ -92,20 +68,3 @@ def all_agents() -> dict:
     return {row["name"]: dict(row) for row in rows}
 
 
-def migrate_from_json(json_path: Path):
-    """One-time migration from agents.json to SQLite."""
-    if not json_path.exists():
-        return 0
-    with open(json_path) as f:
-        agents = json.load(f)
-    count = 0
-    for name, record in agents.items():
-        save_agent(
-            name=name,
-            hub_secret=record.get("hub_secret", ""),
-            hub_proxy_token=record.get("hub_proxy_token", ""),
-            tg_proxy_token=record.get("tg_proxy_token", ""),
-            telegram_bot_token=record.get("telegram_bot_token", ""),
-        )
-        count += 1
-    return count
