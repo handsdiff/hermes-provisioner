@@ -224,6 +224,17 @@ changes, because manual fixes don't feed back into the script.
 - **Custom API keys** — users can't easily give agents access to their own APIs.
   Provisioning API could expose an endpoint for adding per-agent integrations
   without requiring exe.dev knowledge.
+- **User SSH access to agent VMs** — Hermes CLI is popular but users currently
+  only get HTTP + Shelley access via `share add`. Need SSH for `hermes chat`.
+  Two options, untested:
+  1. **exe.dev team plan** ($25/user/month) — `share add {name} team` +
+     `share access allow {name}` gives per-VM SSH scoping. Native, clean,
+     but adds per-user cost.
+  2. **Key injection** ($0) — write user's public key to `authorized_keys`
+     on the VM during provisioning. Unknown whether exe.dev forwards SSH to
+     the VM's sshd for keys not on the account. **Test needed:** remove a
+     known key from the exe.dev account, add it to `authorized_keys` on a
+     VM, and try to SSH. If it works, key injection is the path.
 - **Browser tools fragility** — the Playwright/Chromium symlink is version-pinned
   and will break on agent-browser updates. Fix: modify Hermes to use CDP
   directly (like Shelley does), removing the Playwright dependency entirely.
