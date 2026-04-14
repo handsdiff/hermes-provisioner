@@ -248,6 +248,9 @@ changes, because manual fixes don't feed back into the script.
   (depends on upstream PR #7297 landing).
 - **Billing and quotas** — inference is currently free. Metering and usage limits
   needed for sustainability at scale.
+- **Fleet-wide agent updates** — admin endpoint to push hermes-agent code
+  updates to all provisioned VMs (git pull + reinstall + restart). Individual
+  settings (config.yaml, SOUL.md, crons) are outside the repo and preserved.
 
 ## Upstream fork
 
