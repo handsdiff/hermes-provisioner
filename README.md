@@ -240,9 +240,11 @@ changes, because manual fixes don't feed back into the script.
 - **Agent self-signup risk** — agents may sign up for external services on their
   own, acquiring credentials outside the integration model. No current
   mitigation; open design question.
-- **Integration DNS race** — hermes gateway can fail to connect to Telegram on
-  first boot because per-agent integration DNS hasn't propagated yet. Could add
-  a delay before starting hermes, or retry logic in the setup script.
+- **Provisioning DNS reliability** — setup script can fail if the VM's DNS
+  resolver isn't ready when `git clone` runs (github.com unresolvable), and
+  integration DNS may not be ready when hermes starts (transient failures on
+  first boot). Add polling/retries in provision.py to verify DNS at each stage
+  before proceeding.
 
 ### Long-term
 
