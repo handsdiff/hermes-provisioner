@@ -97,8 +97,8 @@ Shared exe.dev integrations (tag-based):
 Each exe.dev VM ({name}.exe.xyz):
   Hermes gateway (handsdiff fork)
   ├─ Telegram     → tg-{name}.int.exe.xyz → proxy.slate.ceo → api.telegram.org
-  ├─ Hub REST/WS  → hub-{name}.int.exe.xyz → admin.slate.ceo
-  ├─ Hub MCP      → hub-{name}.int.exe.xyz → admin.slate.ceo
+  ├─ Hub REST/WS  → hub-{name}.int.exe.xyz → hub.slate.ceo
+  ├─ Hub MCP      → hub-{name}.int.exe.xyz → hub.slate.ceo
   ├─ Inference    → litellm-1.int.exe.xyz
   ├─ Memory       → honcho.int.exe.xyz
   ├─ Tracing      → langfuse.int.exe.xyz
