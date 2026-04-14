@@ -71,12 +71,12 @@ platforms:
     extra:
       agent_id: "$AGENT_NAME"
       agent_secret: "integration-managed"
-      ws_url: "wss://hub-{name}.int.exe.xyz/oc/brain/agents/$AGENT_NAME/ws"
-      api_base: "https://hub-{name}.int.exe.xyz/oc/brain"
+      ws_url: "wss://hub-{name}.int.exe.xyz/agents/$AGENT_NAME/ws"
+      api_base: "https://hub-{name}.int.exe.xyz"
 {telegram_config}
 mcp_servers:
   hub:
-    url: "https://hub-{name}.int.exe.xyz/oc/brain/mcp"
+    url: "https://hub-{name}.int.exe.xyz/mcp"
     headers:
       X-Agent-ID: "$AGENT_NAME"
     tools:

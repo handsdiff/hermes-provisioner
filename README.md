@@ -85,7 +85,7 @@ proxy.slate.ceo (Telegram URL rewriter)
   Rewrites bot token from header → URL path for Telegram Bot API
 
 Per-agent exe.dev integrations (created at provision time):
-  hub-{name}  → https://admin.slate.ceo   (injects X-Agent-Secret)
+  hub-{name}  → https://hub.slate.ceo   (injects X-Agent-Secret)
   tg-{name}   → https://proxy.slate.ceo   (injects X-Bot-Token)
 
 Shared exe.dev integrations (tag-based):

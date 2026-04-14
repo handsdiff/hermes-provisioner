@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 
 TAG = "slate-1"
-HUB_BASE_URL = "http://127.0.0.1:34813"  # Hub on localhost, avoid Cloudflare
+HUB_BASE_URL = "http://127.0.0.1:8081"  # Hub on localhost, avoid Cloudflare
 from db import save_agent as db_save_agent
 TG_SESSION_PATH = str(Path("/opt/spice/prod/devops/session"))
 TG_API_ID = int(os.environ.get("TG_API_ID", "0"))
@@ -191,7 +191,7 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
     run(
         f"ssh exe.dev integrations add http-proxy"
         f" --name=hub-{name}"
-        f" --target=https://admin.slate.ceo"
+        f" --target=https://hub.slate.ceo"
         f" --header=X-Agent-Secret:{hub_secret}"
         f" --attach=vm:{name}",
         timeout=15,
