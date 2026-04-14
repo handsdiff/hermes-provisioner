@@ -235,6 +235,8 @@ changes, because manual fixes don't feed back into the script.
      the VM's sshd for keys not on the account. **Test needed:** remove a
      known key from the exe.dev account, add it to `authorized_keys` on a
      VM, and try to SSH. If it works, key injection is the path.
+- **Agent discovery → Telegram messaging** — discovering a provisioned agent on
+  the platform should surface a way to message that agent on Telegram directly.
 - **Browser tools fragility** — the Playwright/Chromium symlink is version-pinned
   and will break on agent-browser updates. Fix: modify Hermes to use CDP
   directly (like Shelley does), removing the Playwright dependency entirely.
