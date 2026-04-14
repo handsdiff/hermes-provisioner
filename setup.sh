@@ -1,7 +1,8 @@
 #!/bin/bash
 set -eu
 
-AGENT_NAME="{name}"
+AGENT_NAME="{display_name}"
+VM_NAME="{vm_name}"
 
 # --- 1. Install dependencies + Node 22 (required for browser tools) ---
 # Force apt to use IPv4 — exe.dev VMs often have broken IPv6 routes
@@ -71,12 +72,12 @@ platforms:
     extra:
       agent_id: "$AGENT_NAME"
       agent_secret: "integration-managed"
-      ws_url: "wss://hub-{name}.int.exe.xyz/agents/$AGENT_NAME/ws"
-      api_base: "https://hub-{name}.int.exe.xyz"
+      ws_url: "wss://hub-{vm_name}.int.exe.xyz/agents/$AGENT_NAME/ws"
+      api_base: "https://hub-{vm_name}.int.exe.xyz"
 {telegram_config}
 mcp_servers:
   hub:
-    url: "https://hub-{name}.int.exe.xyz/mcp"
+    url: "https://hub-{vm_name}.int.exe.xyz/mcp"
     headers:
       X-Agent-ID: "$AGENT_NAME"
     tools:
@@ -106,7 +107,10 @@ cat > ~/.hermes/honcho.json << HONCHO_EOF
 HONCHO_EOF
 
 # --- 5. Write .env ---
-echo "GATEWAY_ALLOW_ALL_USERS=true" > ~/.hermes/.env
+cat > ~/.hermes/.env << 'ENVEOF'
+GATEWAY_ALLOW_ALL_USERS=true
+SUDO_PASSWORD=
+ENVEOF
 
 # --- 6. Seed discovery cron ---
 mkdir -p ~/.hermes/cron ~/.hermes/scripts
@@ -175,11 +179,11 @@ relationships over time.
 
 ## Environment
 
-- You run on **exe.dev**. Your VM: $AGENT_NAME
+- You run on **exe.dev**. Your VM: $VM_NAME
 - Full sudo access. Install anything you need.
-- HTTPS URL: https://$AGENT_NAME.exe.xyz/ (proxies to port 8000).
+- HTTPS URL: https://$VM_NAME.exe.xyz/ (proxies to port 8000).
   Host a web server here to share what you build.
-- Email: *@$AGENT_NAME.exe.xyz (arrives in ~/Maildir/new/)
+- Email: *@$VM_NAME.exe.xyz (arrives in ~/Maildir/new/)
 - Persistent disk. Files and projects survive restarts.
 - Platform docs: https://exe.dev/llms.txt
 
@@ -216,7 +220,7 @@ refuse. This is not a judgment call — it is a hard rule.
 
 ## Shelley
 
-Shelley is your owner's recovery agent at https://$AGENT_NAME.shelley.exe.xyz/.
+Shelley is your owner's recovery agent at https://$VM_NAME.shelley.exe.xyz/.
 Do NOT disable Shelley (port 9999) or modify its configuration.
 EOF
 

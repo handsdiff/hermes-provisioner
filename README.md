@@ -73,6 +73,53 @@ email. The agent shares what it's working on openly. Only the owner (from the
 home channel) can direct destructive system actions — behavioral guard, not
 hard ACLs.
 
+## Agent naming
+
+The API accepts any casing and short names. Internally, three name values
+are derived from the user's input:
+
+| Name | Derivation | Used for |
+|---|---|---|
+| `agent_name` | Exactly what the user typed (e.g. `"Sal"`) | Telegram bot display name |
+| `name` | Lowercased `agent_name` (e.g. `"sal"`) | DB primary key, Hub agent ID, API lookups |
+| `vm_name` | `name` if >= 5 chars, else `"slate-" + name` (e.g. `"slate-sal"`) | exe.dev VM, integrations, DNS, SSH, URLs |
+
+**Why three names?**
+
+- exe.dev requires VM names to be lowercase, 5-52 chars, starting with a
+  letter. Short names like "Sal" don't meet the minimum, so we prepend
+  `slate-` to make `slate-sal`.
+- The user-facing identity should preserve their casing — Telegram bot name
+  shows "Sal", not "slate-sal".
+- DB lookups and collision detection use the lowercased `name` so that "Sal",
+  "sal", and "SAL" all resolve to the same agent.
+
+**Example flow:** User creates agent `"Sal"`:
+
+```
+POST /agents?agent_name=Sal&...
+→ agent_name = "Sal"       (Telegram bot name)
+→ name       = "sal"       (DB key, Hub ID, GET/DELETE path)
+→ vm_name    = "slate-sal" (VM, integrations, URLs)
+
+Response: {"agent_name": "Sal", "name": "sal", "vm_name": "slate-sal", "status": "provisioning"}
+
+GET /agents/Sal  →  lowercased to "sal"  →  found
+GET /agents/sal  →  same result
+
+VM:          slate-sal.exe.xyz
+Integrations: hub-slate-sal, tg-slate-sal
+Telegram bot: "Sal"
+Hub agent ID: "sal"
+```
+
+**Longer names pass through unchanged:** User creates `"SallyBot"`:
+
+```
+→ name    = "sallybot"  (>= 5 chars, no prefix needed)
+→ vm_name = "sallybot"
+```
+
 ## Architecture
 
 ```
@@ -184,6 +231,29 @@ changes, because manual fixes don't feed back into the script.
 - **Env files** (`server.env`, `proxy.env`) are gitignored — they contain secrets.
 - **Shared venv** at `/opt/spice/prod/spiceenv/bin/python`.
 - **nginx config** at `/opt/spice/prod/config/nginx-sf1.conf` (git-tracked).
+
+### Viewing logs (journalctl)
+
+`journalctl --user -u <unit>` does **not** work on this machine. systemd 257
+(Debian trixie) removed the per-user journald instance, and the user journal
+stopped receiving entries after an OOM event on 2026-04-10. Logs still land
+in the system journal with the correct `_SYSTEMD_USER_UNIT` field.
+
+Use this instead:
+
+```bash
+# Follow logs for a specific service
+journalctl _SYSTEMD_USER_UNIT=my-hermes-server@prod.service -f
+
+# Last 50 lines
+journalctl _SYSTEMD_USER_UNIT=my-hermes-server@prod.service -n 50
+
+# All four services
+journalctl _SYSTEMD_USER_UNIT=my-hermes-server@prod.service -f   # provisioning API
+journalctl _SYSTEMD_USER_UNIT=my-hermes-proxy@prod.service -f    # Telegram URL rewriter
+journalctl _SYSTEMD_USER_UNIT=my-hub@prod.service -f             # Hub server
+journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP server
+```
 
 ### exe.dev gotchas
 

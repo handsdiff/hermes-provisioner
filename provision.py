@@ -120,8 +120,18 @@ async def resolve_telegram_user(username: str) -> tuple[int, str]:
 SETUP_SCRIPT = (Path(__file__).parent / "setup.sh").read_text()
 
 
-def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
-    """Provision a Hermes agent on exe.dev. Returns result dict."""
+def provision_agent(name, email, telegram_bot_token="", telegram_username="",
+                    display_name="", vm_name=""):
+    """Provision a Hermes agent on exe.dev. Returns result dict.
+
+    name: lowercased agent name (DB key, Hub agent ID)
+    display_name: original user-provided name (Telegram bot name)
+    vm_name: exe.dev VM name (may have 'slate-' prefix for short names)
+    """
+    if not display_name:
+        display_name = name
+    if not vm_name:
+        vm_name = name
     # 1. Register agent on Hub
     print("Registering agent on Hub...")
     hub_agent_id, hub_secret = register_hub_agent(
@@ -134,17 +144,17 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
     save_agent_credentials(name, hub_secret, "", "", telegram_bot_token)
     print("  Credentials saved to DB")
 
-    # 3. Rename Telegram bot to match agent name
+    # 3. Rename Telegram bot to match agent name (use display_name for casing)
     if telegram_bot_token:
-        print(f"Renaming Telegram bot to '{name}'...")
+        print(f"Renaming Telegram bot to '{display_name}'...")
         try:
             resp = httpx.post(
                 f"https://api.telegram.org/bot{telegram_bot_token}/setMyName",
-                json={"name": name},
+                json={"name": display_name},
                 timeout=10.0,
             )
             if resp.json().get("ok"):
-                print(f"  Bot renamed to '{name}'")
+                print(f"  Bot renamed to '{display_name}'")
             else:
                 print(f"  Warning: rename failed: {resp.json()}")
         except Exception as e:
@@ -181,8 +191,8 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
             '    token: "unused"\n'
             + home_channel_block +
             '    extra:\n'
-            f'      base_url: "https://tg-{name}.int.exe.xyz/bot"\n'
-            f'      base_file_url: "https://tg-{name}.int.exe.xyz/file/bot"\n'
+            f'      base_url: "https://tg-{vm_name}.int.exe.xyz/bot"\n'
+            f'      base_file_url: "https://tg-{vm_name}.int.exe.xyz/file/bot"\n'
         )
         soul_telegram = (
             '- **Telegram** — how humans reach you. Anyone can message your bot.\n'
@@ -195,106 +205,110 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
         soul_telegram = ""
 
     # 6. Create VM
-    print(f"Creating VM '{name}'...")
-    out = run(f"ssh exe.dev new --name={name} --env AGENT_NAME={name}", timeout=30)
+    print(f"Creating VM '{vm_name}'...")
+    out = run(f"ssh exe.dev new --name={vm_name} --env AGENT_NAME={display_name}", timeout=30)
     print(f"  {out}")
 
     # 7. Tag VM (shared integrations: inference, tracing, memory)
     print(f"Tagging VM with '{TAG}', 'langfuse', and 'honcho'...")
-    run(f"ssh exe.dev tag {name} {TAG}", timeout=10)
-    run(f"ssh exe.dev tag {name} langfuse", timeout=10)
-    run(f"ssh exe.dev tag {name} honcho", timeout=10)
+    run(f"ssh exe.dev tag {vm_name} {TAG}", timeout=10)
+    run(f"ssh exe.dev tag {vm_name} langfuse", timeout=10)
+    run(f"ssh exe.dev tag {vm_name} honcho", timeout=10)
 
     # 8. Create per-agent integrations (zero secrets on VM)
     print(f"Creating per-agent Hub integration...")
     run(
         f"ssh exe.dev integrations add http-proxy"
-        f" --name=hub-{name}"
+        f" --name=hub-{vm_name}"
         f" --target=https://hub.slate.ceo"
         f" --header=X-Agent-Secret:{hub_secret}"
-        f" --attach=vm:{name}",
+        f" --attach=vm:{vm_name}",
         timeout=15,
     )
     if telegram_bot_token:
         print(f"Creating per-agent Telegram integration...")
         run(
             f"ssh exe.dev integrations add http-proxy"
-            f" --name=tg-{name}"
+            f" --name=tg-{vm_name}"
             f" --target=https://proxy.slate.ceo"
             f" --header=X-Bot-Token:{telegram_bot_token}"
-            f" --attach=vm:{name}",
+            f" --attach=vm:{vm_name}",
             timeout=15,
         )
 
     # 9. Enable email
     print("Enabling inbound email...")
-    run(f"ssh exe.dev share receive-email {name} on", timeout=10)
+    run(f"ssh exe.dev share receive-email {vm_name} on", timeout=10)
 
     # 10. Share VM with user and grant SSH + Shelley access
     print(f"Sharing VM with {email}...")
-    run(f"ssh exe.dev share add {name} {email}", timeout=10)
+    run(f"ssh exe.dev share add {vm_name} {email}", timeout=10)
     run(f"ssh exe.dev team add {email}", timeout=10, check=False)
-    run(f"ssh exe.dev share access allow {name}", timeout=10)
+    run(f"ssh exe.dev share access allow {vm_name}", timeout=10)
 
     # 11. Make VM public (products only — Shelley/SSH stay gated)
     print("Making VM public...")
-    run(f"ssh exe.dev share set-public {name}", timeout=10)
+    run(f"ssh exe.dev share set-public {vm_name}", timeout=10)
 
     # 12. Wait for SSH + DNS
     print("Waiting for SSH...")
-    if not wait_for_ssh(name):
-        raise RuntimeError(f"VM '{name}' not reachable via SSH after 60s")
+    if not wait_for_ssh(vm_name):
+        raise RuntimeError(f"VM '{vm_name}' not reachable via SSH after 60s")
     print("  SSH ready")
     print("Waiting for VM DNS...")
-    if not wait_for_vm_dns(name):
-        raise RuntimeError(f"VM '{name}' cannot resolve DNS after 30s")
+    if not wait_for_vm_dns(vm_name):
+        raise RuntimeError(f"VM '{vm_name}' cannot resolve DNS after 30s")
     print("  DNS ready")
 
     # 13. Run setup
     print("Running setup (this takes a few minutes)...")
     script = (
         SETUP_SCRIPT
-        .replace("{name}", name)
+        .replace("{display_name}", display_name)
+        .replace("{vm_name}", vm_name)
         .replace("{telegram_config}", telegram_config)
         .replace("{soul_telegram}", soul_telegram)
         .replace("{owner_email}", email)
         .replace("{owner_name}", owner_name or email)
     )
-    ssh_vm(name, script, timeout=600)
+    ssh_vm(vm_name, script, timeout=600)
 
-    # 13. Copy cron context scripts to the VM
+    # 14. Copy cron context scripts to the VM
     print("Copying cron context scripts...")
     scripts_dir = Path(__file__).parent
     for script_file in scripts_dir.glob("*_context.py"):
         run(
             ["scp", "-o", "StrictHostKeyChecking=no",
-             str(script_file), f"{name}.exe.xyz:.hermes/scripts/"],
+             str(script_file), f"{vm_name}.exe.xyz:.hermes/scripts/"],
             timeout=30,
         )
         print(f"  {script_file.name}")
 
     return {
         "name": name,
-        "url": f"https://{name}.exe.xyz",
-        "shelley": f"https://{name}.shelley.exe.xyz/",
-        "ssh": f"ssh {name}.exe.xyz",
+        "display_name": display_name,
+        "vm_name": vm_name,
+        "url": f"https://{vm_name}.exe.xyz",
+        "shelley": f"https://{vm_name}.shelley.exe.xyz/",
+        "ssh": f"ssh {vm_name}.exe.xyz",
         "hub_agent_id": hub_agent_id,
         "telegram_configured": bool(telegram_bot_token),
     }
 
 
-def destroy_agent(name):
-    """Delete a VM, its integrations, and DB record. Returns result dict."""
-    from db import delete_agent as db_delete_agent
+def destroy_agent(vm_name):
+    """Delete a VM and its integrations. Returns result dict.
+
+    vm_name: the exe.dev VM name (may differ from agent name for short names).
+    DB cleanup is handled by the caller.
+    """
     print(f"Removing per-agent integrations...")
-    run(f"ssh exe.dev integrations remove hub-{name}", timeout=15, check=False)
-    run(f"ssh exe.dev integrations remove tg-{name}", timeout=15, check=False)
-    print(f"Deleting VM '{name}'...")
-    run(f"ssh exe.dev rm {name}", timeout=30)
+    run(f"ssh exe.dev integrations remove hub-{vm_name}", timeout=15, check=False)
+    run(f"ssh exe.dev integrations remove tg-{vm_name}", timeout=15, check=False)
+    print(f"Deleting VM '{vm_name}'...")
+    run(f"ssh exe.dev rm {vm_name}", timeout=30)
     print(f"  VM deleted")
-    db_delete_agent(name)
-    print(f"  DB record removed")
-    return {"name": name, "deleted": True}
+    return {"vm_name": vm_name, "deleted": True}
 
 
 def main():
@@ -302,11 +316,17 @@ def main():
         print(f"Usage: {sys.argv[0]} <agent-name> <user-email> [telegram-bot-token] [telegram-username]")
         sys.exit(1)
 
+    agent_name = sys.argv[1]
+    name = agent_name.lower()
+    vm = name if len(name) >= 5 else f"slate-{name}"
+
     try:
         result = provision_agent(
-            sys.argv[1], sys.argv[2],
+            name, sys.argv[2],
             sys.argv[3] if len(sys.argv) > 3 else "",
             sys.argv[4] if len(sys.argv) > 4 else "",
+            display_name=agent_name,
+            vm_name=vm,
         )
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)

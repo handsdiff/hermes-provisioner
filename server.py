@@ -33,14 +33,26 @@ def _check_admin(api_key: str | None):
 
 
 def _validate_name(name: str):
-    if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
-        raise HTTPException(status_code=400, detail="name must be alphanumeric, hyphens, or underscores only")
+    """Validate user-provided agent name."""
+    if not name or len(name) > 46:
+        raise HTTPException(status_code=400, detail="name must be 1-46 characters")
+    if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*", name):
+        raise HTTPException(status_code=400, detail="name must start with a letter, contain only letters/digits/hyphens, no consecutive/trailing hyphens")
 
 
-def _provision_background(name, email, telegram_bot_token, telegram_username):
+def _vm_name(name: str) -> str:
+    """Derive exe.dev VM name from agent name (lowercase, min 5 chars)."""
+    vm = name.lower()
+    if len(vm) < 5:
+        vm = f"slate-{vm}"
+    return vm
+
+
+def _provision_background(name, vm_name, display_name, email, telegram_bot_token, telegram_username):
     """Run provisioning in a background thread, updating DB status."""
     try:
-        provision_agent(name, email, telegram_bot_token, telegram_username)
+        provision_agent(name, email, telegram_bot_token, telegram_username,
+                        display_name=display_name, vm_name=vm_name)
         set_agent_status(name, "ready")
     except Exception as e:
         set_agent_status(name, "failed", str(e))
@@ -55,23 +67,25 @@ def health():
 @app.post("/agents")
 def create_agent(
     agent_name: str,
-    email: str,
+    owner_email: str,
     telegram_bot_token: str,
-    telegram_username: str,
+    owner_telegram_username: str,
     x_api_key: str = Header(None, alias="X-Api-Key"),
 ):
     _check_auth(x_api_key)
     _validate_name(agent_name)
-    if get_agent(agent_name):
-        raise HTTPException(status_code=409, detail=f"Agent '{agent_name}' already exists")
+    name = agent_name.lower()
+    vm_name = _vm_name(agent_name)
+    if get_agent(name):
+        raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
     thread = threading.Thread(
         target=_provision_background,
-        args=(agent_name, email, telegram_bot_token, telegram_username),
+        args=(name, vm_name, agent_name, owner_email, telegram_bot_token, owner_telegram_username),
         daemon=True,
     )
     thread.start()
     return JSONResponse(
-        {"agent_name": agent_name, "status": "provisioning"},
+        {"agent_name": agent_name, "name": name, "vm_name": vm_name, "status": "provisioning"},
         status_code=202,
     )
 
@@ -79,17 +93,18 @@ def create_agent(
 @app.get("/agents/{name}")
 def get_agent_status(name: str, x_api_key: str = Header(None, alias="X-Api-Key")):
     _check_auth(x_api_key)
-    _validate_name(name)
+    name = name.lower()
     agent = get_agent(name)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-    result = {"name": agent["name"], "status": agent.get("status", "ready")}
+    vm = _vm_name(name)
+    result = {"name": name, "vm_name": vm, "status": agent.get("status", "ready")}
     if agent.get("error"):
         result["error"] = agent["error"]
     if result["status"] == "ready":
-        result["url"] = f"https://{name}.exe.xyz"
-        result["shelley"] = f"https://{name}.shelley.exe.xyz/"
-        result["ssh"] = f"ssh {name}.exe.xyz"
+        result["url"] = f"https://{vm}.exe.xyz"
+        result["shelley"] = f"https://{vm}.shelley.exe.xyz/"
+        result["ssh"] = f"ssh {vm}.exe.xyz"
     return JSONResponse(result)
 
 
@@ -106,13 +121,15 @@ def list_agents(x_api_key: str = Header(None, alias="X-Api-Key")):
 @app.delete("/agents/{name}")
 def delete_agent_endpoint(name: str, x_api_key: str = Header(None, alias="X-Api-Key")):
     _check_admin(x_api_key)
-    _validate_name(name)
+    name = name.lower()
     if not get_agent(name):
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     try:
-        result = destroy_agent(name)
+        result = destroy_agent(_vm_name(name))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    from db import delete_agent as db_delete_agent
+    db_delete_agent(name)
     return JSONResponse(result)
 
 
