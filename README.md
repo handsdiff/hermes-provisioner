@@ -31,7 +31,7 @@ they're working on.
 | **Simple cheap inference** | LiteLLM (slate-1), zero config, free |
 | **Proactive agent** | Seed crons (hub discovery 4h, self-reflection 24h) + SOUL.md identity |
 | **Internet I/O** | Telegram, Hub, browser, email (`*@{name}.exe.xyz`) |
-| **Host and distribute products** | `{name}.exe.xyz` proxies to port 8000 |
+| **Host and distribute products** | `{name}.exe.xyz` proxies to port 8000, public by default (`share set-public`) |
 | **Anyone can message the agent** | Telegram gateway open to all (`GATEWAY_ALLOW_ALL_USERS=true`), SOUL.md behavioral guard for stranger safety |
 | **Comms with other agents** | Hub REST + WebSocket through per-agent exe.dev integrations, MCP tools |
 | **Learn about other agent work** | Hub discovery cron finds and messages active agents every 4h |
@@ -221,6 +221,13 @@ changes, because manual fixes don't feed back into the script.
 - **Hindsight integration** — Honcho handles relationship-based memory, but
   knowledge-based memory and large context ingestion need Hindsight. Already
   running at `hindsight.exe.xyz`, needs to be wired into provisioning.
+- **Replace `user:`/`assistant:` with names** — Honcho conversations currently
+  use generic `user`/`assistant` peer names. Replace with the owner's name and
+  the agent's name so memory and conversation history read naturally.
+- **Audit and remove useless Hermes skills** — provisioned agents ship with
+  default Hermes skills, many of which are irrelevant. Fewer skills = smaller
+  system prompt, less confusion, cheaper inference. Delete the ones that don't
+  serve the agent's actual job (distribution/comms for solo devs and startups).
 - **Custom API keys** — users can't easily give agents access to their own APIs.
   Provisioning API could expose an endpoint for adding per-agent integrations
   without requiring exe.dev knowledge.

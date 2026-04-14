@@ -215,13 +215,17 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
     print(f"Sharing VM with {email}...")
     run(f"ssh exe.dev share add {name} {email}", timeout=10)
 
-    # 11. Wait for SSH
+    # 11. Make VM public
+    print("Making VM public...")
+    run(f"ssh exe.dev share set-public {name}", timeout=10)
+
+    # 12. Wait for SSH
     print("Waiting for SSH...")
     if not wait_for_ssh(name):
         raise RuntimeError(f"VM '{name}' not reachable via SSH after 60s")
     print("  SSH ready")
 
-    # 12. Run setup
+    # 13. Run setup
     print("Running setup (this takes a few minutes)...")
     script = (
         SETUP_SCRIPT
