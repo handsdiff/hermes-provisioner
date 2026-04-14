@@ -16,9 +16,20 @@ def _connect() -> sqlite3.Connection:
             hub_secret TEXT,
             hub_proxy_token TEXT,
             tg_proxy_token TEXT,
-            telegram_bot_token TEXT
+            telegram_bot_token TEXT,
+            status TEXT DEFAULT 'provisioning',
+            error TEXT
         )
     """)
+    # Add status/error columns if upgrading from old schema
+    try:
+        con.execute("ALTER TABLE agents ADD COLUMN status TEXT DEFAULT 'ready'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        con.execute("ALTER TABLE agents ADD COLUMN error TEXT")
+    except sqlite3.OperationalError:
+        pass
     con.commit()
     return con
 
@@ -28,14 +39,27 @@ def save_agent(name: str, hub_secret: str, hub_proxy_token: str,
     """Insert or update an agent record."""
     con = _connect()
     con.execute(
-        """INSERT INTO agents (name, hub_secret, hub_proxy_token, tg_proxy_token, telegram_bot_token)
-           VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO agents (name, hub_secret, hub_proxy_token, tg_proxy_token, telegram_bot_token, status)
+           VALUES (?, ?, ?, ?, ?, 'provisioning')
            ON CONFLICT(name) DO UPDATE SET
                hub_secret=excluded.hub_secret,
                hub_proxy_token=excluded.hub_proxy_token,
                tg_proxy_token=excluded.tg_proxy_token,
-               telegram_bot_token=excluded.telegram_bot_token""",
+               telegram_bot_token=excluded.telegram_bot_token,
+               status='provisioning',
+               error=''""",
         (name, hub_secret, hub_proxy_token, tg_proxy_token, telegram_bot_token),
+    )
+    con.commit()
+    con.close()
+
+
+def set_agent_status(name: str, status: str, error: str = ""):
+    """Update an agent's provisioning status."""
+    con = _connect()
+    con.execute(
+        "UPDATE agents SET status = ?, error = ? WHERE name = ?",
+        (status, error, name),
     )
     con.commit()
     con.close()

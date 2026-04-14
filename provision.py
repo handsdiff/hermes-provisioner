@@ -51,6 +51,25 @@ def wait_for_ssh(name, retries=30, delay=2):
     return False
 
 
+def wait_for_vm_dns(name, retries=15, delay=2):
+    """Wait until the VM can resolve external hostnames (github.com)."""
+    for i in range(retries):
+        try:
+            r = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no",
+                 f"{name}.exe.xyz", "dig +short github.com"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return True
+        except subprocess.TimeoutExpired:
+            pass
+        if i < retries - 1:
+            print(f"  waiting for DNS... ({i+1}/{retries})")
+            time.sleep(delay)
+    return False
+
+
 def ssh_vm(name, script, timeout=300):
     """Run a script on the VM via SSH."""
     return run(
@@ -221,11 +240,15 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
     print("Making VM public...")
     run(f"ssh exe.dev share set-public {name}", timeout=10)
 
-    # 12. Wait for SSH
+    # 12. Wait for SSH + DNS
     print("Waiting for SSH...")
     if not wait_for_ssh(name):
         raise RuntimeError(f"VM '{name}' not reachable via SSH after 60s")
     print("  SSH ready")
+    print("Waiting for VM DNS...")
+    if not wait_for_vm_dns(name):
+        raise RuntimeError(f"VM '{name}' cannot resolve DNS after 30s")
+    print("  DNS ready")
 
     # 13. Run setup
     print("Running setup (this takes a few minutes)...")
