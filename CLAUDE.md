@@ -29,6 +29,9 @@ internet I/O, host and distribute products, learn about other agent work.
 - **Provisioning API** — server.py (FastAPI) with POST/GET/DELETE /agents
   endpoints. provision.py exports `provision_agent()` and `destroy_agent()`
   as shared helpers used by both the API and the CLI.
+- **User SSH access** — exe.dev team plan, `team add` + `share access allow`
+  gives per-VM SSH + Shelley for `hermes chat`. Billing owner 2FA protects
+  against unauthorized purchases.
 
 ## What's NOT delivered
 

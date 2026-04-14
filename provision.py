@@ -211,11 +211,13 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
     print("Enabling inbound email...")
     run(f"ssh exe.dev share receive-email {name} on", timeout=10)
 
-    # 10. Share VM with user
+    # 10. Share VM with user and grant SSH + Shelley access
     print(f"Sharing VM with {email}...")
     run(f"ssh exe.dev share add {name} {email}", timeout=10)
+    run(f"ssh exe.dev team add {email}", timeout=10, check=False)
+    run(f"ssh exe.dev share access allow {name}", timeout=10)
 
-    # 11. Make VM public
+    # 11. Make VM public (products only — Shelley/SSH stay gated)
     print("Making VM public...")
     run(f"ssh exe.dev share set-public {name}", timeout=10)
 
