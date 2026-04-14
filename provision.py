@@ -162,8 +162,8 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
             '    token: "unused"\n'
             + home_channel_block +
             '    extra:\n'
-            f'      base_url: "https://tg-{name}.int.exe.xyz"\n'
-            f'      base_file_url: "https://tg-{name}.int.exe.xyz"\n'
+            f'      base_url: "https://tg-{name}.int.exe.xyz/bot"\n'
+            f'      base_file_url: "https://tg-{name}.int.exe.xyz/file/bot"\n'
         )
         soul_telegram = (
             '- **Telegram** — how humans reach you. Anyone can message your bot.\n'
