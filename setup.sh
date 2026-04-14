@@ -3,6 +3,7 @@ set -eu
 
 AGENT_NAME="{display_name}"
 VM_NAME="{vm_name}"
+HUB_AGENT_ID="{hub_agent_id}"
 
 # --- 1. Install dependencies + Node 22 (required for browser tools) ---
 # Force apt to use IPv4 — exe.dev VMs often have broken IPv6 routes
@@ -70,16 +71,16 @@ platforms:
   hub:
     enabled: true
     extra:
-      agent_id: "$AGENT_NAME"
+      agent_id: "$HUB_AGENT_ID"
       agent_secret: "integration-managed"
-      ws_url: "wss://hub-{vm_name}.int.exe.xyz/agents/$AGENT_NAME/ws"
+      ws_url: "wss://hub-{vm_name}.int.exe.xyz/agents/$HUB_AGENT_ID/ws"
       api_base: "https://hub-{vm_name}.int.exe.xyz"
 {telegram_config}
 mcp_servers:
   hub:
     url: "https://hub-{vm_name}.int.exe.xyz/mcp"
     headers:
-      X-Agent-ID: "$AGENT_NAME"
+      X-Agent-ID: "$HUB_AGENT_ID"
     tools:
       include: ["hub"]
       prompts: false
@@ -171,9 +172,10 @@ relationships over time.
 
 ## Platforms
 
-- **Hub** — a network of capable AI agents. Your primary way to discover
-  agents, be discovered, collaborate, and help other agents with their goals.
-  Use the \`hub\` MCP tool to find and message agents.
+- **Hub** — a network of capable AI agents. Your agent ID on Hub is
+  \`$HUB_AGENT_ID\`. Your primary way to discover agents, be discovered,
+  collaborate, and help other agents with their goals. Use the \`hub\` MCP
+  tool to find and message agents.
 {soul_telegram}
 - **Browser** — web research, exploration, and interaction.
 

@@ -120,18 +120,24 @@ async def resolve_telegram_user(username: str) -> tuple[int, str]:
 SETUP_SCRIPT = (Path(__file__).parent / "setup.sh").read_text()
 
 
-def provision_agent(name, email, telegram_bot_token="", telegram_username="",
-                    display_name="", vm_name=""):
-    """Provision a Hermes agent on exe.dev. Returns result dict.
+def prepare_agent(name, email, telegram_bot_token="", telegram_username="",
+                  display_name="", vm_name=""):
+    """Fast pre-checks: Hub registration, DB save, Telegram info.
 
-    name: lowercased agent name (DB key, Hub agent ID)
-    display_name: original user-provided name (Telegram bot name)
-    vm_name: exe.dev VM name (may have 'slate-' prefix for short names)
+    Called synchronously before returning 202. Raises on failure so the
+    user gets an immediate error response instead of a silent background failure.
+
+    Returns a context dict consumed by provision_agent().
     """
     if not display_name:
         display_name = name
     if not vm_name:
         vm_name = name
+
+    # Sanitize inputs
+    if telegram_bot_token:
+        telegram_bot_token = telegram_bot_token.strip()
+
     # 1. Register agent on Hub
     print("Registering agent on Hub...")
     hub_agent_id, hub_secret = register_hub_agent(
@@ -144,8 +150,20 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username="",
     save_agent_credentials(name, hub_secret, "", "", telegram_bot_token)
     print("  Credentials saved to DB")
 
-    # 3. Rename Telegram bot to match agent name (use display_name for casing)
+    # 3. Validate bot token and get bot info
+    telegram_bot_username = ""
     if telegram_bot_token:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{telegram_bot_token}/getMe",
+            timeout=10.0,
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"Invalid Telegram bot token: {data.get('description', 'getMe failed')}")
+        telegram_bot_username = data["result"].get("username", "")
+        print(f"  Bot username: @{telegram_bot_username}")
+
+        # Rename bot to display_name
         print(f"Renaming Telegram bot to '{display_name}'...")
         try:
             resp = httpx.post(
@@ -194,15 +212,47 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username="",
             f'      base_url: "https://tg-{vm_name}.int.exe.xyz/bot"\n'
             f'      base_file_url: "https://tg-{vm_name}.int.exe.xyz/file/bot"\n'
         )
-        soul_telegram = (
-            '- **Telegram** — how humans reach you. Anyone can message your bot.\n'
-            '  Welcome them — they might be users, collaborators, or people your\n'
-            '  owner should know about.\n'
-        )
+        if telegram_bot_username:
+            soul_telegram = (
+                f'- **Telegram** — how humans reach you. Your bot: @{telegram_bot_username}\n'
+                f'  (https://t.me/{telegram_bot_username}). Anyone can message you.\n'
+                '  Welcome them — they might be users, collaborators, or people your\n'
+                '  owner should know about.\n'
+            )
+        else:
+            soul_telegram = (
+                '- **Telegram** — how humans reach you. Anyone can message your bot.\n'
+                '  Welcome them — they might be users, collaborators, or people your\n'
+                '  owner should know about.\n'
+            )
         print(f"  Telegram bot token provided — will configure Telegram platform")
     else:
         telegram_config = ""
         soul_telegram = ""
+
+    return {
+        "hub_agent_id": hub_agent_id,
+        "hub_secret": hub_secret,
+        "telegram_bot_token": telegram_bot_token,
+        "telegram_bot_username": telegram_bot_username,
+        "telegram_config": telegram_config,
+        "soul_telegram": soul_telegram,
+        "owner_name": owner_name,
+    }
+
+
+def provision_agent(name, email, vm_name, display_name, prep):
+    """Provision the exe.dev VM using context from prepare_agent().
+
+    This is the slow part — VM creation, SSH setup, config deployment.
+    Called in a background thread.
+    """
+    hub_agent_id = prep["hub_agent_id"]
+    hub_secret = prep["hub_secret"]
+    telegram_config = prep["telegram_config"]
+    soul_telegram = prep["soul_telegram"]
+    owner_name = prep["owner_name"]
+    telegram_bot_token = prep.get("telegram_bot_token", "")
 
     # 6. Create VM
     print(f"Creating VM '{vm_name}'...")
@@ -266,6 +316,7 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username="",
         SETUP_SCRIPT
         .replace("{display_name}", display_name)
         .replace("{vm_name}", vm_name)
+        .replace("{hub_agent_id}", hub_agent_id)
         .replace("{telegram_config}", telegram_config)
         .replace("{soul_telegram}", soul_telegram)
         .replace("{owner_email}", email)
@@ -321,13 +372,14 @@ def main():
     vm = name if len(name) >= 5 else f"slate-{name}"
 
     try:
-        result = provision_agent(
+        prep = prepare_agent(
             name, sys.argv[2],
             sys.argv[3] if len(sys.argv) > 3 else "",
             sys.argv[4] if len(sys.argv) > 4 else "",
             display_name=agent_name,
             vm_name=vm,
         )
+        result = provision_agent(name, sys.argv[2], vm, agent_name, prep)
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

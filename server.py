@@ -10,7 +10,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from db import all_agents, get_agent, set_agent_status
-from provision import provision_agent, destroy_agent
+from provision import prepare_agent, provision_agent, destroy_agent
 
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 PROVISIONER_ADMIN_KEY = os.environ.get("PROVISIONER_ADMIN_KEY", "")
@@ -48,11 +48,10 @@ def _vm_name(name: str) -> str:
     return vm
 
 
-def _provision_background(name, vm_name, display_name, email, telegram_bot_token, telegram_username):
-    """Run provisioning in a background thread, updating DB status."""
+def _provision_background(name, email, vm_name, display_name, prep):
+    """Run VM provisioning in a background thread, updating DB status."""
     try:
-        provision_agent(name, email, telegram_bot_token, telegram_username,
-                        display_name=display_name, vm_name=vm_name)
+        provision_agent(name, email, vm_name, display_name, prep)
         set_agent_status(name, "ready")
     except Exception as e:
         set_agent_status(name, "failed", str(e))
@@ -78,9 +77,21 @@ def create_agent(
     vm_name = _vm_name(agent_name)
     if get_agent(name):
         raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
+
+    # Synchronous pre-checks: Hub registration, DB save, Telegram info.
+    # Failures here return immediately to the caller.
+    try:
+        prep = prepare_agent(
+            name, owner_email, telegram_bot_token, owner_telegram_username,
+            display_name=agent_name, vm_name=vm_name,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # VM creation + setup runs in background
     thread = threading.Thread(
         target=_provision_background,
-        args=(name, vm_name, agent_name, owner_email, telegram_bot_token, owner_telegram_username),
+        args=(name, owner_email, vm_name, agent_name, prep),
         daemon=True,
     )
     thread.start()

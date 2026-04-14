@@ -309,6 +309,11 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
 - **destroy_agent doesn't deregister from Hub** — agent record persists in
   Hub agents.json after VM deletion. Need a Hub API endpoint for deletion,
   or have destroy_agent remove the record directly.
+- **Shared skills across fleet** — agent-created skills (e.g. `exe-dev-hosting`)
+  are lost when a VM is destroyed and not available to newly provisioned agents.
+  Skills created by any hosted agent should be collected and distributed to
+  all agents in the fleet (e.g. a shared skills repo synced at provision time,
+  or a skills exchange via Hub).
 
 ### Long-term
 
