@@ -54,24 +54,24 @@ def health():
 
 @app.post("/agents")
 def create_agent(
-    name: str,
+    agent_name: str,
     email: str,
     telegram_bot_token: str,
     telegram_username: str,
     x_api_key: str = Header(None, alias="X-Api-Key"),
 ):
     _check_auth(x_api_key)
-    _validate_name(name)
-    if get_agent(name):
-        raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
+    _validate_name(agent_name)
+    if get_agent(agent_name):
+        raise HTTPException(status_code=409, detail=f"Agent '{agent_name}' already exists")
     thread = threading.Thread(
         target=_provision_background,
-        args=(name, email, telegram_bot_token, telegram_username),
+        args=(agent_name, email, telegram_bot_token, telegram_username),
         daemon=True,
     )
     thread.start()
     return JSONResponse(
-        {"name": name, "status": "provisioning"},
+        {"agent_name": agent_name, "status": "provisioning"},
         status_code=202,
     )
 
