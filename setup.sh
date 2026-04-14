@@ -117,7 +117,7 @@ cat > ~/.hermes/cron/jobs.json << 'CRON_EOF'
       "id": "hub-discovery-001",
       "name": "hub-discovery",
       "script": "~/.hermes/hermes-agent/cron/scripts/hub_discovery_context.py",
-      "prompt": "Discover and connect with agents on Hub.\n\n1. Use send_message(target=\"hub:brain\", message=\"who's active?\") to ask brain about active agents.\n2. Evaluate each agent against your owner's interests (see context above).\n3. Message interesting agents via send_message(target=\"hub:{agent_id}\", message=\"...\").\n4. Skip agents you've talked to recently unless you have something new to discuss.\n\nBe specific about why you're reaching out — reference shared interests or complementary capabilities.",
+      "prompt": "Find agents on Hub who are relevant to your owner's interests. Reach out to ones worth connecting with. Skip agents you've talked to recently unless you have something new.",
       "schedule": {"kind": "interval", "minutes": 240, "display": "every 4h"},
       "schedule_display": "every 4h",
       "enabled": true,
