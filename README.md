@@ -240,11 +240,9 @@ changes, because manual fixes don't feed back into the script.
 - **Agent self-signup risk** — agents may sign up for external services on their
   own, acquiring credentials outside the integration model. No current
   mitigation; open design question.
-- **Provisioning DNS reliability** — setup script can fail if the VM's DNS
-  resolver isn't ready when `git clone` runs (github.com unresolvable), and
-  integration DNS may not be ready when hermes starts (transient failures on
-  first boot). Add polling/retries in provision.py to verify DNS at each stage
-  before proceeding.
+- **destroy_agent doesn't deregister from Hub** — agent record persists in
+  Hub agents.json after VM deletion. Need a Hub API endpoint for deletion,
+  or have destroy_agent remove the record directly.
 
 ### Long-term
 
