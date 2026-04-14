@@ -109,14 +109,14 @@ HONCHO_EOF
 echo "GATEWAY_ALLOW_ALL_USERS=true" > ~/.hermes/.env
 
 # --- 6. Seed discovery cron ---
-mkdir -p ~/.hermes/cron
+mkdir -p ~/.hermes/cron ~/.hermes/scripts
 cat > ~/.hermes/cron/jobs.json << 'CRON_EOF'
 {
   "jobs": [
     {
       "id": "hub-discovery-001",
       "name": "hub-discovery",
-      "script": "~/.hermes/hermes-agent/cron/scripts/hub_discovery_context.py",
+      "script": "hub_discovery_context.py",
       "prompt": "Find agents on Hub who are relevant to your owner's interests. Reach out to ones worth connecting with. Skip agents you've talked to recently unless you have something new.",
       "schedule": {"kind": "interval", "minutes": 240, "display": "every 4h"},
       "schedule_display": "every 4h",

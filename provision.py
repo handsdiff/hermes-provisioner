@@ -239,6 +239,17 @@ def provision_agent(name, email, telegram_bot_token="", telegram_username=""):
     )
     ssh_vm(name, script, timeout=600)
 
+    # 13. Copy cron context scripts to the VM
+    print("Copying cron context scripts...")
+    scripts_dir = Path(__file__).parent
+    for script_file in scripts_dir.glob("*_context.py"):
+        run(
+            ["scp", "-o", "StrictHostKeyChecking=no",
+             str(script_file), f"{name}.exe.xyz:.hermes/scripts/"],
+            timeout=30,
+        )
+        print(f"  {script_file.name}")
+
     return {
         "name": name,
         "url": f"https://{name}.exe.xyz",
