@@ -192,7 +192,7 @@ integration-injected header and rewrites it into the URL path.
 ### Provision via API
 
 ```bash
-curl -X POST 'https://provision.slate.ceo/agents?name=my-agent&email=user@example.com&telegram_bot_token=TOKEN&telegram_username=USERNAME' \
+curl -X POST 'https://provision.slate.ceo/agents?agent_name=MyAgent&owner_email=user@example.com&telegram_bot_token=TOKEN&owner_telegram_username=USERNAME' \
   -H 'X-Api-Key: YOUR_API_KEY'
 ```
 
@@ -201,15 +201,29 @@ Interactive docs at `https://provision.slate.ceo/docs`.
 ### Provision via CLI
 
 ```bash
-python3 provision.py my-agent user@example.com BOT_TOKEN @username
+python3 provision.py MyAgent user@example.com BOT_TOKEN @username
 ```
 
 ### Delete an agent (admin key required)
 
 ```bash
-curl -X DELETE 'https://provision.slate.ceo/agents/my-agent' \
+curl -X DELETE 'https://provision.slate.ceo/agents/myagent' \
   -H 'X-Api-Key: ADMIN_KEY'
 ```
+
+### Update all agents (admin key required)
+
+Pushes latest hermes-agent code to all ready agents (git pull + pip install
++ restart). Also ensures `.env` has required vars like `SUDO_PASSWORD=`.
+
+```bash
+curl -X POST 'https://provision.slate.ceo/agents/update' \
+  -H 'X-Api-Key: ADMIN_KEY'
+```
+
+Returns 202 with the list of agents being updated. Updates run in background.
+Individual agent settings (config.yaml, SOUL.md, crons) are outside the repo
+and preserved.
 
 ## Development practices
 
@@ -289,9 +303,6 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
 
 ### Near-term
 
-- **Hindsight integration** — Honcho handles relationship-based memory, but
-  knowledge-based memory and large context ingestion need Hindsight. Already
-  running at `hindsight.exe.xyz`, needs to be wired into provisioning.
 - **Custom API keys** — users can't easily give agents access to their own APIs.
   Provisioning API could expose an endpoint for adding per-agent integrations
   without requiring exe.dev knowledge.
@@ -300,6 +311,22 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
 - **Browser tools fragility** — the Playwright/Chromium symlink is version-pinned
   and will break on agent-browser updates. Fix: modify Hermes to use CDP
   directly (like Shelley does), removing the Playwright dependency entirely.
+- **Migrate existing agents to new provisioner** — agents on the legacy Docker
+  system (admin.slate.ceo/oc/*) need to be re-provisioned on exe.dev VMs.
+  Preserve their identity, memory, and Hub registration during migration.
+- **Wind down legacy system** — once all agents are migrated, retire the Docker
+  provisioner (devops service), shared proxy (`proxy` integration), and
+  admin.slate.ceo/oc/ routing.
+- **X article on public agents** — thesis: public multiplayer vs private single
+  player. Blocked primarily by security, then comms, then memory. Easy product
+  creation but hosting and distributing is a wall. Already using agents to
+  understand the industry (can't keep up manually — this will only get worse
+  and is a massive problem for humans that don't want to get left behind).
+  Nothing shipped yet but working on it. Every enterprise will have a public
+  agent: first replacing docs, then qualifying inbound, then discovering
+  through outbound. Relationship to A2A (starts internal for teams within
+  enterprises, then moves external). IP-based account provisioning + internal
+  networking seems like a strong business opportunity.
 
 ### Medium-term
 
@@ -314,6 +341,10 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
   Skills created by any hosted agent should be collected and distributed to
   all agents in the fleet (e.g. a shared skills repo synced at provision time,
   or a skills exchange via Hub).
+- **Hindsight integration** — knowledge-based memory for company-level context
+  (owner's work, products, domain knowledge), not per-agent conversation memory
+  (that's Honcho). Already running at `hindsight.exe.xyz`, needs to be wired
+  into provisioning so all agents for the same owner share company context.
 
 ### Long-term
 
@@ -323,9 +354,6 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
   (depends on upstream PR #7297 landing).
 - **Billing and quotas** — inference is currently free. Metering and usage limits
   needed for sustainability at scale.
-- **Fleet-wide agent updates** — admin endpoint to push hermes-agent code
-  updates to all provisioned VMs (git pull + reinstall + restart). Individual
-  settings (config.yaml, SOUL.md, crons) are outside the repo and preserved.
 
 ## Upstream fork
 

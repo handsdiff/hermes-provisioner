@@ -12,7 +12,7 @@ import httpx
 
 TAG = "slate-1"
 HUB_BASE_URL = "http://127.0.0.1:8081"  # Hub on localhost, avoid Cloudflare
-from db import save_agent as db_save_agent
+from db import save_agent
 TG_SESSION_PATH = str(Path("/opt/spice/prod/devops/session"))
 TG_API_ID = int(os.environ.get("TG_API_ID", "0"))
 TG_API_HASH = os.environ.get("TG_API_HASH", "")
@@ -96,11 +96,13 @@ def register_hub_agent(agent_id, description="", capabilities=None):
     return data["agent_id"], data["secret"]
 
 
-def save_agent_credentials(name, hub_secret, hub_proxy_token, tg_proxy_token="",
-                           telegram_bot_token=""):
-    """Save agent credentials to the database for the proxy."""
-    db_save_agent(name, hub_secret, hub_proxy_token, tg_proxy_token,
-                  telegram_bot_token)
+def save_agent_record(name, hub_secret, telegram_bot_token="",
+                      vm_name="", display_name="",
+                      owner_email="", owner_telegram=""):
+    """Save agent record to the database."""
+    save_agent(name, hub_secret, telegram_bot_token,
+               vm_name=vm_name, display_name=display_name,
+               owner_email=owner_email, owner_telegram=owner_telegram)
 
 
 async def resolve_telegram_user(username: str) -> tuple[int, str]:
@@ -147,7 +149,9 @@ def prepare_agent(name, email, telegram_bot_token="", telegram_username="",
     print(f"  Hub agent: {hub_agent_id}")
 
     # 2. Save credentials to DB
-    save_agent_credentials(name, hub_secret, "", "", telegram_bot_token)
+    save_agent_record(name, hub_secret, telegram_bot_token,
+                      vm_name=vm_name, display_name=display_name,
+                      owner_email=email, owner_telegram=telegram_username)
     print("  Credentials saved to DB")
 
     # 3. Validate bot token and get bot info
@@ -360,6 +364,35 @@ def destroy_agent(vm_name):
     run(f"ssh exe.dev rm {vm_name}", timeout=30)
     print(f"  VM deleted")
     return {"vm_name": vm_name, "deleted": True}
+
+
+UPDATE_SCRIPT = (
+    "cd ~/.hermes/hermes-agent"
+    " && git fetch origin"
+    " && git reset --hard origin/main"
+    " && . venv/bin/activate"
+    " && pip install -e '.[all]' -q"
+    # Ensure .env has required vars (additive, won't duplicate)
+    " && grep -q '^SUDO_PASSWORD=' ~/.hermes/.env 2>/dev/null"
+    "    || echo 'SUDO_PASSWORD=' >> ~/.hermes/.env"
+    " && sudo systemctl restart hermes"
+)
+
+
+def update_agent(vm_name):
+    """Update hermes-agent code on a VM and restart. Returns result dict."""
+    print(f"Updating {vm_name}...")
+    try:
+        out = run(
+            ["ssh", "-o", "StrictHostKeyChecking=no", f"{vm_name}.exe.xyz",
+             UPDATE_SCRIPT],
+            timeout=120,
+        )
+        print(f"  {vm_name}: updated")
+        return {"vm_name": vm_name, "status": "updated"}
+    except Exception as e:
+        print(f"  {vm_name}: failed — {e}")
+        return {"vm_name": vm_name, "status": "failed", "error": str(e)}
 
 
 def main():

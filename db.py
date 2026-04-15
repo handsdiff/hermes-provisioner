@@ -13,42 +13,47 @@ def _connect() -> sqlite3.Connection:
     con.execute("""
         CREATE TABLE IF NOT EXISTS agents (
             name TEXT PRIMARY KEY,
+            vm_name TEXT,
+            display_name TEXT,
+            owner_email TEXT,
+            owner_telegram TEXT,
             hub_secret TEXT,
-            hub_proxy_token TEXT,
-            tg_proxy_token TEXT,
             telegram_bot_token TEXT,
             status TEXT DEFAULT 'provisioning',
             error TEXT
         )
     """)
-    # Add status/error columns if upgrading from old schema
-    try:
-        con.execute("ALTER TABLE agents ADD COLUMN status TEXT DEFAULT 'ready'")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        con.execute("ALTER TABLE agents ADD COLUMN error TEXT")
-    except sqlite3.OperationalError:
-        pass
+    # Migrate: add new columns if upgrading from old schema
+    for col in ["vm_name", "display_name", "owner_email", "owner_telegram",
+                "status", "error"]:
+        try:
+            con.execute(f'ALTER TABLE agents ADD COLUMN {col} TEXT DEFAULT ""')
+        except sqlite3.OperationalError:
+            pass
     con.commit()
     return con
 
 
-def save_agent(name: str, hub_secret: str, hub_proxy_token: str,
-               tg_proxy_token: str = "", telegram_bot_token: str = ""):
+def save_agent(name: str, hub_secret: str, telegram_bot_token: str = "",
+               vm_name: str = "", display_name: str = "",
+               owner_email: str = "", owner_telegram: str = ""):
     """Insert or update an agent record."""
     con = _connect()
     con.execute(
-        """INSERT INTO agents (name, hub_secret, hub_proxy_token, tg_proxy_token, telegram_bot_token, status)
-           VALUES (?, ?, ?, ?, ?, 'provisioning')
+        """INSERT INTO agents (name, vm_name, display_name, owner_email,
+               owner_telegram, hub_secret, telegram_bot_token, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'provisioning')
            ON CONFLICT(name) DO UPDATE SET
+               vm_name=excluded.vm_name,
+               display_name=excluded.display_name,
+               owner_email=excluded.owner_email,
+               owner_telegram=excluded.owner_telegram,
                hub_secret=excluded.hub_secret,
-               hub_proxy_token=excluded.hub_proxy_token,
-               tg_proxy_token=excluded.tg_proxy_token,
                telegram_bot_token=excluded.telegram_bot_token,
                status='provisioning',
                error=''""",
-        (name, hub_secret, hub_proxy_token, tg_proxy_token, telegram_bot_token),
+        (name, vm_name, display_name, owner_email, owner_telegram,
+         hub_secret, telegram_bot_token),
     )
     con.commit()
     con.close()
@@ -73,7 +78,6 @@ def get_agent(name: str) -> dict | None:
     return dict(row) if row else None
 
 
-
 def delete_agent(name: str) -> bool:
     """Delete an agent by name. Returns True if deleted, False if not found."""
     con = _connect()
@@ -92,3 +96,11 @@ def all_agents() -> dict:
     return {row["name"]: dict(row) for row in rows}
 
 
+# Fields that should never be exposed in public API responses
+_PRIVATE_FIELDS = {"hub_secret", "telegram_bot_token", "owner_email", "owner_telegram",
+                    "hub_proxy_token", "tg_proxy_token"}
+
+
+def public_agent_info(agent: dict) -> dict:
+    """Strip private fields from an agent record for API responses."""
+    return {k: v for k, v in agent.items() if k not in _PRIVATE_FIELDS}

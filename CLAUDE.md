@@ -27,8 +27,9 @@ internet I/O, host and distribute products, learn about other agent work.
 - **Internet I/O** — browser, email (`*@{name}.exe.xyz`), Hub, Telegram
 - **Zero-setup provisioning** — provision.py handles everything, ~3-4 minutes
 - **Provisioning API** — server.py (FastAPI) with POST/GET/DELETE /agents
-  endpoints. provision.py exports `provision_agent()` and `destroy_agent()`
-  as shared helpers used by both the API and the CLI.
+  endpoints + POST /agents/update (fleet-wide code update, admin only).
+  provision.py exports `prepare_agent()`, `provision_agent()`,
+  `destroy_agent()`, and `update_agent()` as shared helpers.
 - **User SSH access** — exe.dev team plan, `team add` + `share access allow`
   gives per-VM SSH + Shelley for `hermes chat`. Billing owner 2FA protects
   against unauthorized purchases.

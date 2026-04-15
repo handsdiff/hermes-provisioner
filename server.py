@@ -9,8 +9,8 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
-from db import all_agents, get_agent, set_agent_status
-from provision import prepare_agent, provision_agent, destroy_agent
+from db import all_agents, get_agent, set_agent_status, public_agent_info
+from provision import prepare_agent, provision_agent, destroy_agent, update_agent
 
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 PROVISIONER_ADMIN_KEY = os.environ.get("PROVISIONER_ADMIN_KEY", "")
@@ -109,10 +109,9 @@ def get_agent_status(name: str, x_api_key: str = Header(None, alias="X-Api-Key")
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     vm = _vm_name(name)
-    result = {"name": name, "vm_name": vm, "status": agent.get("status", "ready")}
-    if agent.get("error"):
-        result["error"] = agent["error"]
-    if result["status"] == "ready":
+    result = public_agent_info(agent)
+    result["vm_name"] = vm
+    if result.get("status") == "ready":
         result["url"] = f"https://{vm}.exe.xyz"
         result["shelley"] = f"https://{vm}.shelley.exe.xyz/"
         result["ssh"] = f"ssh {vm}.exe.xyz"
@@ -124,7 +123,7 @@ def list_agents(x_api_key: str = Header(None, alias="X-Api-Key")):
     _check_auth(x_api_key)
     agents = all_agents()
     return JSONResponse({
-        name: {"name": name, "status": info.get("status", "ready")}
+        name: public_agent_info(info)
         for name, info in agents.items()
     })
 
@@ -142,6 +141,38 @@ def delete_agent_endpoint(name: str, x_api_key: str = Header(None, alias="X-Api-
     from db import delete_agent as db_delete_agent
     db_delete_agent(name)
     return JSONResponse(result)
+
+
+def _update_fleet_background(agents):
+    """Update all agents in background, printing results."""
+    for name, info in agents.items():
+        if info.get("status") != "ready":
+            print(f"  Skipping {name} (status: {info.get('status')})")
+            continue
+        vm = _vm_name(name)
+        result = update_agent(vm)
+        if result["status"] == "failed":
+            print(f"  FAILED {name}: {result['error']}")
+
+
+@app.post("/agents/update")
+def update_fleet(x_api_key: str = Header(None, alias="X-Api-Key")):
+    """Update hermes-agent code on all ready agents. Admin key required."""
+    _check_admin(x_api_key)
+    agents = all_agents()
+    ready = {n: a for n, a in agents.items() if a.get("status") == "ready"}
+    if not ready:
+        return JSONResponse({"ok": True, "message": "No ready agents to update"})
+    thread = threading.Thread(
+        target=_update_fleet_background,
+        args=(ready,),
+        daemon=True,
+    )
+    thread.start()
+    return JSONResponse(
+        {"ok": True, "updating": list(ready.keys()), "count": len(ready)},
+        status_code=202,
+    )
 
 
 if __name__ == "__main__":
