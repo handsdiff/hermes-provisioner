@@ -321,6 +321,15 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
 
 ### Next up
 
+- **Migrate existing agents to new provisioner** — agents on the legacy Docker
+  system (admin.slate.ceo/oc/*) need to be re-provisioned on exe.dev VMs.
+  Preserve their identity, memory, and Hub registration during migration.
+
+### Near-term
+
+- **Wind down legacy system** — once all agents are migrated, retire the Docker
+  provisioner (devops service), shared proxy (`proxy` integration), and
+  admin.slate.ceo/oc/ routing.
 - **X article on public agents** — thesis: public multiplayer vs private single
   player. Blocked primarily by security, then comms, then memory. Easy product
   creation but hosting and distributing is a wall. Already using agents to
@@ -331,15 +340,6 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
   through outbound. Relationship to A2A (starts internal for teams within
   enterprises, then moves external). IP-based account provisioning + internal
   networking seems like a strong business opportunity.
-
-### Near-term
-
-- **Migrate existing agents to new provisioner** — agents on the legacy Docker
-  system (admin.slate.ceo/oc/*) need to be re-provisioned on exe.dev VMs.
-  Preserve their identity, memory, and Hub registration during migration.
-- **Wind down legacy system** — once all agents are migrated, retire the Docker
-  provisioner (devops service), shared proxy (`proxy` integration), and
-  admin.slate.ceo/oc/ routing.
 - **Platform evaluation** — still exploring better SSH access on exe.dev, or
   alternative platforms that deliver the same consolidated value props:
   - SSH (CLI access for `hermes chat`)
