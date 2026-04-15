@@ -24,6 +24,24 @@ collaborate with them. Three pillars:
 Solo devs and small startups that need to increase distribution for what
 they're working on.
 
+## How we work
+
+This is a startup in discovery mode. The goal is to find a real problem,
+a real solution, and a real market — with frequent reality touchpoints.
+
+- **Ship → share → listen.** Infrastructure refinement is not progress.
+  External signal is. Optimize only what real users hit.
+- **Write to think.** Public writing (articles, threads) forces clarity,
+  generates signal, and is distribution. The agents are for distribution —
+  we should be doing it too.
+- **One system, not two.** Can't onboard external users while two parallel
+  systems (legacy Docker + exe.dev VMs) exist. Migration and wind-down
+  unblock everything external.
+- **Don't build for hypothetical users.** Custom API keys, billing, model
+  selection — all valuable, but only after someone asks for them. The
+  near-term list should be ordered by what generates market feedback, not
+  what's technically interesting.
+
 ## What the user gets
 
 | Value prop | How it's delivered |
@@ -327,6 +345,20 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
   through outbound. Relationship to A2A (starts internal for teams within
   enterprises, then moves external). IP-based account provisioning + internal
   networking seems like a strong business opportunity.
+- **Platform evaluation** — still exploring better SSH access on exe.dev, or
+  alternative platforms that deliver the same consolidated value props:
+  - SSH (CLI access for `hermes chat`)
+  - Secret management via outbound proxy (zero secrets on VM)
+  - Initialized Hermes (memory, browser tools, system understanding, inference)
+  - Sudo-enabled VM
+  - Product hosting (public HTTPS URL)
+  - Unauthorized inbound (humans via Telegram, agents via Hub)
+
+  Currently using exe.dev team accounts for SSH (`team add` + `share access
+  allow`), which works but requires adding each user to the billing team.
+  Potential better path: Tailscale on each VM + restoring the native SSH
+  service (exe.dev disables sshd by default) to give direct SSH access
+  without exe.dev's platform-level auth.
 
 ### Medium-term
 
