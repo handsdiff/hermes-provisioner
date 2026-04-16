@@ -41,6 +41,11 @@ a real solution, and a real market — with frequent reality touchpoints.
   selection — all valuable, but only after someone asks for them. The
   near-term list should be ordered by what generates market feedback, not
   what's technically interesting.
+- **Catch infra scope creep.** When solving a concrete problem for N=2,
+  don't drift into building a general-purpose system for N=∞. Each step
+  in the abstraction chain may be logical in isolation, but the destination
+  is pure infra work that doesn't ship anything. Solve for today's numbers,
+  upgrade when reality demands it.
 
 ## What the user gets
 
@@ -149,9 +154,20 @@ provision.slate.ceo (FastAPI)
 proxy.slate.ceo (Telegram URL rewriter)
   Rewrites bot token from header → URL path for Telegram Bot API
 
+db.slate.ceo (postgres-mcp SSE, auth-protected)
+  SQL-over-MCP proxy to RDS. One instance per DB user, own port.
+  nginx checks X-DB-Auth header (secret in /opt/spice/_secrets/nginx-db-auth.conf).
+  Agents access via per-agent db-{name} integration which injects the auth header.
+
 Per-agent exe.dev integrations (created at provision time):
   hub-{name}  → https://hub.slate.ceo   (injects X-Agent-Secret)
   tg-{name}   → https://proxy.slate.ceo   (injects X-Bot-Token)
+
+Per-agent exe.dev integrations (migration agents with DB/API access):
+  db-{name}    → https://db.slate.ceo     (injects X-DB-Auth)
+  x-{name}     → https://api.x.com        (injects Bearer token)
+  slack-{name}  → https://slack.com        (injects Bearer token)
+  coda-{name}  → https://coda.io          (injects Bearer token)
 
 Shared exe.dev integrations (tag-based):
   litellm-1   tag:slate-1    (inference)
@@ -203,7 +219,9 @@ integration-injected header and rewrites it into the URL path.
 | `server.py` | FastAPI provisioning API. POST/GET/DELETE /agents + /health. |
 | `tg_rewriter.py` | Telegram URL rewriter. Reads `X-Bot-Token` header, rewrites to Telegram API path. |
 | `db.py` | SQLite agent database. Atomic writes, WAL mode. |
-| `CLAUDE.md` | Technical reference — architecture facts, integration details, testing approach. |
+| `pgmcp-dylanvu.env` | postgres-mcp env file for dylanvu DB user (gitignored). |
+| `pgmcp-agent.env` | postgres-mcp env file for agent DB user (gitignored). |
+| `migrations/` | Per-agent migration plans and risk analysis. All completed 2026-04-15/16. |
 
 ## Usage
 
@@ -217,6 +235,10 @@ curl -X POST 'https://provision.slate.ceo/agents?agent_name=MyAgent&owner_email=
 Interactive docs at `https://provision.slate.ceo/docs`.
 
 ### Provision via CLI
+
+> **Prefer the API.** CLI provisioning lacks `TG_API_ID`/`TG_API_HASH` (only
+> in `server.env` for the systemd service), so Telegram user resolution fails
+> and owner name + home channel must be fixed manually.
 
 ```bash
 python3 provision.py MyAgent user@example.com BOT_TOKEN @username
@@ -294,10 +316,36 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
 - Integration hostnames match the name: `litellm-1` → `litellm-1.int.exe.xyz`.
 - Integration URLs must use `https://`, not `http://` (301 redirect breaks SDKs).
 - Integration targets cannot contain a path — only scheme + host. The request
-  path is appended automatically.
+  path is appended automatically. Put path prefixes (e.g. `/api`) in the
+  client-side env var instead.
+- Integrations require `--header` or `--bearer` — even for services that handle
+  their own auth. Use it for nginx-layer auth.
 - VMs have broken IPv6 → setup script forces apt IPv4.
+- pnpm is not pre-installed on exe.dev VMs. `sudo npm install -g pnpm` needed.
 - New integrations may take a few seconds for DNS to propagate. The hermes
   gateway can fail to connect on first boot if it starts before DNS resolves.
+
+### postgres-mcp gotchas
+
+- **One instance per DB user** (single-tenant connection pool). Each gets its own
+  port, systemd service (`my-pgmcp-{user}@.service`), and env file.
+- **Returns Python repr, not JSON.** `execute_sql` returns `str(list_of_dicts)`.
+  The MCP adapter wraps queries in `json_agg(row_to_json(...))` and parses the
+  `_json` column. Must handle `json_agg` returning null on empty result sets.
+- **No parameterized queries.** `execute_sql` only accepts raw SQL. The adapter
+  interpolates `$1, $2` params client-side with escaping. Acceptable for
+  application-controlled values.
+- **Auth required.** nginx checks `X-DB-Auth` header (secret in
+  `/opt/spice/_secrets/nginx-db-auth.conf`). Without this, the production DB
+  is publicly queryable via `db.slate.ceo`.
+- **SSE transport only** (no streamable-http). MCP SDK's `SSEClientTransport` is
+  deprecated but required. nginx needs `proxy_buffering off` for SSE.
+- **Port assignments:** 8300 = dylanvu (trapezius), 8301 = agent (vela).
+- **Trailing semicolons** in SQL break JSON-wrapped subqueries. The adapter
+  must strip them before wrapping.
+- **MCP SSE connections time out under sustained load.** For bulk operations
+  (100+ queries), use a batch-reconnect pattern — open, do N queries, close,
+  repeat.
 
 ### Hermes gotchas
 
@@ -321,23 +369,14 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
 
 ### Next up
 
-- **Migrate existing agents to new provisioner** — agents on the legacy Docker
-  system (admin.slate.ceo/oc/*) need to be re-provisioned on exe.dev VMs.
-  Preserve their identity, memory, and Hub registration during migration.
-
-### Near-term
-
-- **Wind down legacy system** — once all agents are migrated, retire the Docker
-  provisioner (devops service), shared proxy (`proxy` integration), and
-  admin.slate.ceo/oc/ routing.
 - **X article on public agents** — thesis: public multiplayer vs private single
   player. Blocked primarily by security, then comms, then memory. Easy product
   creation but hosting and distributing is a wall. Already using agents to
   understand the industry (can't keep up manually — this will only get worse
   and is a massive problem for humans that don't want to get left behind).
   Nothing shipped yet but working on it. Every enterprise will have a public
-  agent: first replacing docs, then qualifying inbound, then discovering
-  through outbound. Relationship to A2A (starts internal for teams within
+  agent: first replacing docs [support agents already do this], then qualifying inbound, then discovering
+  through outbound [ads is one analogy]. Relationship to A2A (starts internal for teams within
   enterprises, then moves external). IP-based account provisioning + internal
   networking seems like a strong business opportunity.
 - **Platform evaluation** — still exploring better SSH access on exe.dev, or

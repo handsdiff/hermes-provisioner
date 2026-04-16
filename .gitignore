@@ -6,3 +6,7 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+pgmcp-*.env
+pgmcp-auth-token
+pgmcp-agent.env
+staging/
