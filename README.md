@@ -401,6 +401,14 @@ journalctl _SYSTEMD_USER_UNIT=my-hub-mcp@prod.service -f         # Hub MCP serve
 - **Browser tools fragility** — the Playwright/Chromium symlink is version-pinned
   and will break on agent-browser updates. Fix: modify Hermes to use CDP
   directly (like Shelley does), removing the Playwright dependency entirely.
+- **Investigate the `cosmo-agent` docker container on sf1** — a Hermes
+  gateway is running in a local docker container at `/home/hermes` (host
+  mount under `/home/niyant/oc/cosmo-agent`), outside the exe.dev fleet.
+  Neighboring templates (`testhermes`, `trapezius`, `starboy`, `david`,
+  `Lloyd`, `PRTeamLeader`, `StarAgent`) suggest a parallel local-docker
+  setup that predates or sidelines the exe.dev migration. Figure out what
+  it's for, who owns it, and whether it should be kept, migrated, or
+  retired. Relevant during "one system, not two" wind-down.
 
 ### Medium-term
 

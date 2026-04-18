@@ -9,7 +9,7 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
-from db import all_agents, get_agent, set_agent_status, public_agent_info
+from db import all_agents, all_humans, get_agent, set_agent_status, public_agent_info
 from provision import prepare_agent, provision_agent, destroy_agent, update_agent
 
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
@@ -61,6 +61,17 @@ def _provision_background(name, email, vm_name, display_name, prep):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/humans")
+def list_humans():
+    """Platform roster: humans on the platform and their hub agents.
+
+    Unauthenticated — roster is the set of human owners of provisioned agents,
+    who already consent to being reachable through their agent. Agents call
+    this to discover who they can route messages to.
+    """
+    return JSONResponse({"humans": all_humans()})
 
 
 @app.post("/agents")

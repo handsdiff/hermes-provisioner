@@ -2,7 +2,9 @@
 """Create an exe.dev VM running a Hermes agent with inference, browser, Hub, and Shelley access."""
 
 import asyncio
+import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -78,6 +80,123 @@ def ssh_vm(name, script, timeout=300):
     )
 
 
+# --- Integrations manifest --------------------------------------------------
+#
+# Human-readable descriptions for the integrations agents see in their
+# `integrations list` tool output. Prefix match on integration name — the
+# first matching prefix wins. Keep these customer-facing.
+_INTEGRATION_PURPOSE_BY_PREFIX = [
+    ("hub-",          "Send messages to other agents on Hub + Hub MCP tools."),
+    ("tg-",           "Send Telegram messages via the rewriter proxy."),
+    ("db-",           "Run SQL queries against your provisioned Postgres (read/write per grant)."),
+    ("x-",            "Post to and read from X (Twitter) via the v2 API."),
+    ("slack-",        "Post to and read from Slack workspaces your admin has wired up."),
+    ("coda-",         "Read and write Coda docs your admin has wired up."),
+    ("openai-embed",  "Generate embeddings via OpenAI. POST /v1/embeddings with model+input."),
+    ("litellm-",      "LLM inference proxy. OpenAI-compatible /v1/chat/completions + /v1/embeddings."),
+    ("langfuse",      "Tracing endpoint for OTEL/langfuse — auto-used by hermes, no manual calls."),
+    ("hindsight",     "Long-horizon memory service (experimental)."),
+]
+
+
+def _integration_purpose(name: str) -> str:
+    for prefix, purpose in _INTEGRATION_PURPOSE_BY_PREFIX:
+        if name.startswith(prefix):
+            return purpose
+    return "Provisioned by platform admin."
+
+
+def _parse_integrations_list(raw: str) -> list[dict]:
+    """Parse the line-oriented output of `exe integrations list`.
+
+    Format per line:
+      <name>  http-proxy  target=<url> [header=<H>:<V>] [peer=<peer>]  <attach>
+    Returns a list of dicts with (name, type, target, auth_desc, attach).
+    """
+    entries: list[dict] = []
+    for raw_line in (raw or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        tokens = re.split(r"\s+", line)
+        if len(tokens) < 4 or tokens[1] != "http-proxy":
+            continue
+        name = tokens[0]
+        attach = tokens[-1]
+        target = ""
+        auth_desc = "auth injected server-side"
+        for tok in tokens[2:-1]:
+            if tok.startswith("target="):
+                target = tok.split("=", 1)[1]
+            elif tok.startswith("header="):
+                # header=<Name>:<value>  → record only the header name
+                hdr_field = tok.split("=", 1)[1]
+                hdr_name = hdr_field.split(":", 1)[0]
+                auth_desc = f"{hdr_name} header injected server-side"
+            elif tok.startswith("peer="):
+                peer = tok.split("=", 1)[1]
+                auth_desc = f"scoped peer API key ({peer})"
+        entries.append({
+            "name": name,
+            "target": target,
+            "auth": auth_desc,
+            "attach": attach,
+        })
+    return entries
+
+
+def build_integrations_manifest(vm_name: str, vm_tags: list[str]) -> dict:
+    """Return a redacted manifest of integrations visible to this VM.
+
+    Queries `exe integrations list`, filters by `vm:<vm_name>` OR
+    `tag:<tag>` for any tag the VM carries, strips secret values, and
+    enriches each entry with a human-readable purpose.
+    """
+    raw = run("ssh exe.dev integrations list", timeout=20)
+    parsed = _parse_integrations_list(raw)
+    tag_set = {f"tag:{t}" for t in vm_tags}
+    per_agent_attach = f"vm:{vm_name}"
+    entries: list[dict] = []
+    for e in parsed:
+        if e["attach"] == per_agent_attach:
+            scope = "per-agent"
+        elif e["attach"] in tag_set:
+            scope = "shared"
+        else:
+            continue
+        entries.append({
+            "name": e["name"],
+            "url": f"https://{e['name']}.int.exe.xyz",
+            "target": e["target"],
+            "auth": e["auth"],
+            "scope": scope,
+            "purpose": _integration_purpose(e["name"]),
+        })
+    entries.sort(key=lambda x: (x["scope"] != "per-agent", x["name"]))
+    return {"integrations": entries}
+
+
+def write_integrations_manifest(vm_name: str, vm_tags: list[str]) -> int:
+    """Build the manifest and scp it to ~/.hermes/integrations.json on the VM.
+
+    Returns the number of integrations written.
+    """
+    manifest = build_integrations_manifest(vm_name, vm_tags)
+    payload = json.dumps(manifest, indent=2) + "\n"
+    # Write via a here-doc through ssh — avoids the stdin-to-scp quirk
+    # where plain `scp -` hits permission/path edge cases on exe.dev VMs.
+    remote_cmd = (
+        "mkdir -p ~/.hermes && "
+        "cat > ~/.hermes/integrations.json"
+    )
+    subprocess.run(
+        ["ssh", "-o", "StrictHostKeyChecking=no",
+         f"{vm_name}.exe.xyz", remote_cmd],
+        input=payload, text=True, check=True, timeout=30,
+    )
+    return len(manifest.get("integrations", []))
+
+
 def register_hub_agent(agent_id, description="", capabilities=None):
     """Register an agent on Hub. Returns (agent_id, secret)."""
     payload = {"agent_id": agent_id}
@@ -98,11 +217,13 @@ def register_hub_agent(agent_id, description="", capabilities=None):
 
 def save_agent_record(name, hub_secret, telegram_bot_token="",
                       vm_name="", display_name="",
-                      owner_email="", owner_telegram=""):
+                      owner_email="", owner_telegram="",
+                      owner_telegram_user_id=""):
     """Save agent record to the database."""
     save_agent(name, hub_secret, telegram_bot_token,
                vm_name=vm_name, display_name=display_name,
-               owner_email=owner_email, owner_telegram=owner_telegram)
+               owner_email=owner_email, owner_telegram=owner_telegram,
+               owner_telegram_user_id=owner_telegram_user_id)
 
 
 async def resolve_telegram_user(username: str) -> tuple[int, str]:
@@ -148,13 +269,7 @@ def prepare_agent(name, email, telegram_bot_token="", telegram_username="",
     )
     print(f"  Hub agent: {hub_agent_id}")
 
-    # 2. Save credentials to DB
-    save_agent_record(name, hub_secret, telegram_bot_token,
-                      vm_name=vm_name, display_name=display_name,
-                      owner_email=email, owner_telegram=telegram_username)
-    print("  Credentials saved to DB")
-
-    # 3. Validate bot token and get bot info
+    # 2. Validate bot token and get bot info
     telegram_bot_username = ""
     if telegram_bot_token:
         resp = httpx.post(
@@ -182,7 +297,7 @@ def prepare_agent(name, email, telegram_bot_token="", telegram_username="",
         except Exception as e:
             print(f"  Warning: could not rename bot: {e}")
 
-    # 4. Resolve Telegram username → numeric ID (for home_channel)
+    # 3. Resolve Telegram username → numeric ID (for home_channel + directory)
     telegram_user_id = ""
     owner_name = ""
     if telegram_username and telegram_bot_token:
@@ -196,6 +311,13 @@ def prepare_agent(name, email, telegram_bot_token="", telegram_username="",
             print(f"  Resolved: {owner_name} (id: {telegram_user_id})")
         except Exception as e:
             print(f"  Warning: could not resolve @{telegram_username}: {e}")
+
+    # 4. Save credentials to DB (user_id persisted so /humans can expose it)
+    save_agent_record(name, hub_secret, telegram_bot_token,
+                      vm_name=vm_name, display_name=display_name,
+                      owner_email=email, owner_telegram=telegram_username,
+                      owner_telegram_user_id=telegram_user_id)
+    print("  Credentials saved to DB")
 
     # 5. Build Telegram config blocks (empty if no bot token)
     if telegram_bot_token:
@@ -263,11 +385,15 @@ def provision_agent(name, email, vm_name, display_name, prep):
     out = run(f"ssh exe.dev new --name={vm_name} --env AGENT_NAME={display_name}", timeout=30)
     print(f"  {out}")
 
-    # 7. Tag VM (shared integrations: inference, tracing, memory)
-    print(f"Tagging VM with '{TAG}', 'langfuse', and 'honcho'...")
+    # 7. Tag VM (shared integrations: inference, tracing)
+    # slate-1 = default/fallback inference; slate-3 = strong model for owner
+    # turns via model.routes (config.yaml). langfuse = OTEL tracing.
+    # Honcho is deliberately not tagged — it was disabled fleet-wide; Hermes
+    # built-in memory (MEMORY.md / USER.md) handles durable memory instead.
+    print(f"Tagging VM with '{TAG}', 'slate-3', and 'langfuse'...")
     run(f"ssh exe.dev tag {vm_name} {TAG}", timeout=10)
+    run(f"ssh exe.dev tag {vm_name} slate-3", timeout=10)
     run(f"ssh exe.dev tag {vm_name} langfuse", timeout=10)
-    run(f"ssh exe.dev tag {vm_name} honcho", timeout=10)
 
     # 8. Create per-agent integrations (zero secrets on VM)
     print(f"Creating per-agent Hub integration...")
@@ -338,6 +464,16 @@ def provision_agent(name, email, vm_name, display_name, prep):
             timeout=30,
         )
         print(f"  {script_file.name}")
+
+    # 15. Write the integrations manifest (layer 1 of the secrets model).
+    # Redacts header values; agent sees names + URLs only.
+    print("Writing integrations manifest...")
+    try:
+        count = write_integrations_manifest(vm_name, vm_tags=[TAG, "slate-3", "langfuse"])
+        print(f"  {count} integration(s) written to ~/.hermes/integrations.json")
+    except Exception as exc:
+        print(f"  WARNING: manifest write failed ({exc}). Not fatal — "
+              "agent will report empty integrations list; re-run backfill later.")
 
     return {
         "name": name,
