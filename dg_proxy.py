@@ -147,7 +147,12 @@ async def _handle(ws_client):
     log.info("%s opening upstream %s", ctx, upstream_url)
     _live_clients.add(ws_client)
     try:
-        async with websockets.connect(upstream_url, max_size=None) as ws_up:
+        # ping_interval=None: let Discord's own gateway heartbeat (in-band
+        # WS frames) be the sole keepalive. The websockets library's
+        # separate WS ping/pong fires during long LLM calls (hermes blocks
+        # the event loop for tens of seconds on slow model turns) and
+        # spuriously tears down the connection.
+        async with websockets.connect(upstream_url, max_size=None, ping_interval=None) as ws_up:
             log.info("%s upstream connected", ctx)
             await asyncio.gather(
                 _client_to_upstream(ws_client, ws_up, token, ctx),
@@ -168,7 +173,13 @@ async def main():
     loop.add_signal_handler(signal.SIGTERM, shutdown.set)
     loop.add_signal_handler(signal.SIGINT, shutdown.set)
 
-    server = await websockets.serve(_handle, LISTEN_HOST, LISTEN_PORT, max_size=None)
+    # ping_interval=None: see comment on websockets.connect below — hermes
+    # blocks the event loop on LLM calls, and the default 20s ping/pong
+    # timeout tears down otherwise-healthy connections.
+    server = await websockets.serve(
+        _handle, LISTEN_HOST, LISTEN_PORT,
+        max_size=None, ping_interval=None,
+    )
     log.info("dg-proxy listening on ws://%s:%s", LISTEN_HOST, LISTEN_PORT)
     await shutdown.wait()
 
