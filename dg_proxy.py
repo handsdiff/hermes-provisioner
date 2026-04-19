@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -98,6 +99,13 @@ async def _upstream_to_client(ws_up, ws_client, ctx):
         await ws_client.send(raw)
 
 
+# Tracks live client connections so we can drain them on SIGTERM. discord.py's
+# reconnect logic treats any non-1000 close (the default for an abrupt proxy
+# exit) as terminal; closing each client with 1000 makes it fall through to
+# its retry path instead.
+_live_clients: set = set()
+
+
 async def _handle(ws_client):
     """One agent connection. Validate ticket → open upstream → pump frames."""
     path = ws_client.request.path if hasattr(ws_client, "request") else getattr(ws_client, "path", "/")
@@ -137,6 +145,7 @@ async def _handle(ws_client):
 
     upstream_url = _upstream_url(path)
     log.info("%s opening upstream %s", ctx, upstream_url)
+    _live_clients.add(ws_client)
     try:
         async with websockets.connect(upstream_url, max_size=None) as ws_up:
             log.info("%s upstream connected", ctx)
@@ -149,13 +158,34 @@ async def _handle(ws_client):
     except Exception as e:
         log.exception("%s upstream error: %s", ctx, e)
     finally:
+        _live_clients.discard(ws_client)
         log.info("%s session done", ctx)
 
 
 async def main():
+    shutdown = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, shutdown.set)
+    loop.add_signal_handler(signal.SIGINT, shutdown.set)
+
+    server = await websockets.serve(_handle, LISTEN_HOST, LISTEN_PORT, max_size=None)
     log.info("dg-proxy listening on ws://%s:%s", LISTEN_HOST, LISTEN_PORT)
-    async with websockets.serve(_handle, LISTEN_HOST, LISTEN_PORT, max_size=None):
-        await asyncio.Future()
+    await shutdown.wait()
+
+    # Graceful drain: close each live client with a spec-clean 1000 so
+    # discord.py's Client.connect() loop takes its retry path instead of
+    # killing the adapter task. Websockets 1006 / no-close-frame (what a
+    # hard exit produces) is treated as terminal by discord.py 2.x.
+    log.info("shutdown signal; draining %d live connection(s)", len(_live_clients))
+    closers = [
+        ws.close(code=1000, reason="dg-proxy restart")
+        for ws in list(_live_clients)
+    ]
+    if closers:
+        await asyncio.gather(*closers, return_exceptions=True)
+    server.close()
+    await server.wait_closed()
+    log.info("dg-proxy exited cleanly")
 
 
 if __name__ == "__main__":
