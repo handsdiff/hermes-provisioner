@@ -58,6 +58,36 @@ def _connect() -> sqlite3.Connection:
             used_at INTEGER
         )
     """)
+    # Optional auth_scheme column on credential_requests — lets the agent
+    # say "Bot" instead of the default "Bearer" (Discord, etc).
+    try:
+        con.execute('ALTER TABLE credential_requests ADD COLUMN auth_scheme TEXT DEFAULT "Bearer"')
+    except sqlite3.OperationalError:
+        pass
+    # agent_service_tokens: the raw credential kept server-side for services
+    # whose auth can't be injected at the HTTP layer (e.g. Discord gateway
+    # IDENTIFY frame). Used by dg-proxy to rewrite outbound frames.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS agent_service_tokens (
+            vm_name TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            token TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (vm_name, service_name)
+        )
+    """)
+    # gateway_tickets: short-lived single-use tokens the agent trades for a
+    # WS handshake. Minted by server.py, consumed by dg-proxy.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS gateway_tickets (
+            ticket TEXT PRIMARY KEY,
+            vm_name TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used_at INTEGER
+        )
+    """)
     con.commit()
     return con
 
@@ -244,3 +274,70 @@ def mark_credential_request_used(token: str) -> bool:
     updated = cur.rowcount > 0
     con.close()
     return updated
+
+
+# ---------------------------------------------------------------------------
+# Gateway-proxy services (dg-proxy et al)
+# ---------------------------------------------------------------------------
+
+
+def save_service_token(vm_name: str, service_name: str, token: str) -> None:
+    con = _connect()
+    con.execute(
+        """INSERT INTO agent_service_tokens
+               (vm_name, service_name, token, created_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(vm_name, service_name) DO UPDATE SET
+               token=excluded.token,
+               created_at=excluded.created_at""",
+        (vm_name, service_name, token, int(time.time())),
+    )
+    con.commit()
+    con.close()
+
+
+def get_service_token(vm_name: str, service_name: str) -> str | None:
+    con = _connect()
+    row = con.execute(
+        "SELECT token FROM agent_service_tokens WHERE vm_name = ? AND service_name = ?",
+        (vm_name, service_name),
+    ).fetchone()
+    con.close()
+    return row["token"] if row else None
+
+
+def save_gateway_ticket(
+    ticket: str, vm_name: str, service_name: str, ttl_seconds: int = 60,
+) -> int:
+    now = int(time.time())
+    expires_at = now + ttl_seconds
+    con = _connect()
+    con.execute(
+        """INSERT INTO gateway_tickets
+               (ticket, vm_name, service_name, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (ticket, vm_name, service_name, now, expires_at),
+    )
+    con.commit()
+    con.close()
+    return expires_at
+
+
+def consume_gateway_ticket(ticket: str) -> dict | None:
+    """Atomically look up + mark-used. Returns the row if valid, else None."""
+    con = _connect()
+    now = int(time.time())
+    row = con.execute(
+        "SELECT * FROM gateway_tickets WHERE ticket = ?", (ticket,)
+    ).fetchone()
+    if not row or row["used_at"] is not None or now >= row["expires_at"]:
+        con.close()
+        return None
+    cur = con.execute(
+        "UPDATE gateway_tickets SET used_at = ? WHERE ticket = ? AND used_at IS NULL",
+        (now, ticket),
+    )
+    con.commit()
+    updated = cur.rowcount > 0
+    con.close()
+    return dict(row) if updated else None

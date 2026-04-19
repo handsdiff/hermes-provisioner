@@ -22,6 +22,8 @@ from db import (
     mark_credential_request_used,
     public_agent_info,
     save_credential_request,
+    save_gateway_ticket,
+    save_service_token,
     set_agent_status,
     vm_for_agent_secret,
 )
@@ -222,8 +224,18 @@ def update_fleet(x_api_key: str = Header(None, alias="X-Api-Key")):
 # ---------------------------------------------------------------------------
 
 SETUP_PUBLIC_BASE = os.environ.get("SETUP_PUBLIC_BASE", "https://provision.slate.ceo")
+DG_GATEWAY_PUBLIC_URL = os.environ.get(
+    "DG_GATEWAY_PUBLIC_URL", "wss://discord-gateway.slate.ceo"
+)
 _SERVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
+_AUTH_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,19}$")
 _CRED_REQUEST_TTL = 900  # 15 minutes
+_GATEWAY_TICKET_TTL = 60  # seconds
+
+# Services that need a gateway proxy (not just HTTP Bearer injection). For
+# these, the Layer 0 submit also stashes the raw token in
+# agent_service_tokens so dg-proxy can rewrite IDENTIFY frames.
+_GATEWAY_PROXIED_SERVICES = {"discord"}
 
 
 def _validate_service_name(service_name: str) -> str:
@@ -275,17 +287,32 @@ async def request_credential(
     service_name = _validate_service_name(body.get("service_name", ""))
     target_url = _validate_target_url(body.get("target_url", ""))
     description = (body.get("description") or "").strip()[:500]
+    auth_scheme = (body.get("auth_scheme") or "Bearer").strip()
+    if not _AUTH_SCHEME_RE.fullmatch(auth_scheme):
+        raise HTTPException(
+            status_code=400,
+            detail="auth_scheme must be letters/digits/hyphens only",
+        )
 
     token = secrets.token_urlsafe(24)
     expires_at = save_credential_request(
         token, vm_name, service_name, target_url, description,
         ttl_seconds=_CRED_REQUEST_TTL,
     )
+    # Stash auth_scheme on the row (column added via ALTER TABLE migration).
+    import sqlite3
+    from db import DB_PATH
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE credential_requests SET auth_scheme = ? WHERE token = ?",
+                (auth_scheme, token))
+    con.commit()
+    con.close()
     return JSONResponse({
         "setup_url": f"{SETUP_PUBLIC_BASE}/integrations/setup/{token}",
         "expires_at": expires_at,
         "service_name": service_name,
         "vm_name": vm_name,
+        "auth_scheme": auth_scheme,
     })
 
 
@@ -393,15 +420,20 @@ def integrations_setup_submit(token: str, credential: str = Form(...)):
     vm = req["vm_name"]
     service = req["service_name"]
     integration_name = f"{service}-{vm}"
+    auth_scheme = (req.get("auth_scheme") or "Bearer").strip() or "Bearer"
     # `ssh exe.dev <argv...>` concatenates and re-parses on the remote side,
     # so credential/target (which may contain shell-sensitive chars) need
     # remote-shell quoting. service/vm/integration_name are already
     # validated to [a-z0-9-] + fixed shape, but quote uniformly for safety.
+    if auth_scheme.lower() == "bearer":
+        auth_arg = shlex.quote(f"--bearer={credential}")
+    else:
+        auth_arg = shlex.quote(f"--header=Authorization:{auth_scheme} {credential}")
     remote_cmd = " ".join([
         "integrations", "add", "http-proxy",
         shlex.quote(f"--name={integration_name}"),
         shlex.quote(f"--target={req['target_url']}"),
-        shlex.quote(f"--bearer={credential}"),
+        auth_arg,
         shlex.quote(f"--attach=vm:{vm}"),
     ])
     try:
@@ -427,6 +459,16 @@ def integrations_setup_submit(token: str, credential: str = Form(...)):
                                 f'<h1 class="err">Setup failed</h1><p>{msg}</p>'),
             status_code=502,
         )
+    # For gateway-proxied services (Discord etc), also stash the raw token
+    # server-side so dg-proxy can rewrite IDENTIFY frames. The agent still
+    # never sees it. Do this before manifest refresh — if it fails, the
+    # token is lost and the user would have to mint a new setup link.
+    if service in _GATEWAY_PROXIED_SERVICES:
+        try:
+            save_service_token(vm, service, credential)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"service-token save failed for {vm}/{service}: {e}")
     # Best-effort: refresh the VM's integrations.json so the agent sees
     # the new capability on its next `integrations list` call. Don't fail
     # the request if this doesn't work — the integration is already live;
@@ -442,6 +484,43 @@ def integrations_setup_submit(token: str, credential: str = Form(...)):
         f'<h1 class="ok">Access granted</h1>'
         f'<p>Agent <code>{html.escape(vm)}</code> now has access to <code>{html.escape(service)}</code>. It can call <code>{html.escape(req["target_url"])}</code> through the platform proxy on its next turn — you can close this tab.</p>',
     ))
+
+
+@app.post("/discord-gateway/ticket")
+async def discord_gateway_ticket(
+    request: Request,
+    x_agent_secret: str = Header(None, alias="X-Agent-Secret"),
+):
+    """Agent-authenticated. Mint a single-use, short-lived ticket the agent
+    uses to open a WebSocket to dg-proxy. The agent sends IDENTIFY with a
+    placeholder token; dg-proxy rewrites it with the real bot token
+    looked up via (vm_name, service_name) in agent_service_tokens.
+    """
+    if not x_agent_secret:
+        raise HTTPException(status_code=401, detail="X-Agent-Secret header required")
+    vm_name = vm_for_agent_secret(x_agent_secret)
+    if not vm_name:
+        raise HTTPException(status_code=401, detail="Unknown agent secret")
+
+    service = "discord"
+    from db import get_service_token as _get_service_token
+    if not _get_service_token(vm_name, service):
+        raise HTTPException(
+            status_code=409,
+            detail=f"no {service} token stored for this agent — run the /integrations/request flow first",
+        )
+
+    ticket = secrets.token_urlsafe(24)
+    expires_at = save_gateway_ticket(ticket, vm_name, service,
+                                     ttl_seconds=_GATEWAY_TICKET_TTL)
+    # Path-based so the ticket survives yarl.URL.with_query() inside
+    # discord.py, which rewrites the query string at connect time.
+    return JSONResponse({
+        "ticket": ticket,
+        "ws_url": f"{DG_GATEWAY_PUBLIC_URL}/tkt/{ticket}",
+        "expires_at": expires_at,
+        "service": service,
+    })
 
 
 if __name__ == "__main__":
