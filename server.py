@@ -25,7 +25,14 @@ from db import (
     set_agent_status,
     vm_for_agent_secret,
 )
-from provision import prepare_agent, provision_agent, destroy_agent, update_agent
+from provision import (
+    prepare_agent,
+    provision_agent,
+    destroy_agent,
+    update_agent,
+    vm_tags_from_exe,
+    write_integrations_manifest,
+)
 
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 PROVISIONER_ADMIN_KEY = os.environ.get("PROVISIONER_ADMIN_KEY", "")
@@ -420,6 +427,16 @@ def integrations_setup_submit(token: str, credential: str = Form(...)):
                                 f'<h1 class="err">Setup failed</h1><p>{msg}</p>'),
             status_code=502,
         )
+    # Best-effort: refresh the VM's integrations.json so the agent sees
+    # the new capability on its next `integrations list` call. Don't fail
+    # the request if this doesn't work — the integration is already live;
+    # worst case the agent has a stale manifest until next provision.
+    try:
+        tags = vm_tags_from_exe(vm)
+        write_integrations_manifest(vm, vm_tags=tags)
+    except Exception as e:
+        traceback.print_exc()
+        print(f"manifest refresh failed for {vm}: {e}")
     return HTMLResponse(_render_result_page(
         "Setup complete",
         f'<h1 class="ok">Access granted</h1>'

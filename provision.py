@@ -147,6 +147,21 @@ def _parse_integrations_list(raw: str) -> list[dict]:
     return entries
 
 
+def vm_tags_from_exe(vm_name: str) -> list[str]:
+    """Return the current tag set for a VM by parsing `ssh exe.dev ls`.
+
+    Output line shape: `  • <vm>.exe.xyz - running (...) #tag1 #tag2 ...`
+    Returns an empty list if the VM is not found.
+    """
+    raw = run("ssh exe.dev ls", timeout=15)
+    prefix = f"• {vm_name}.exe.xyz "
+    for line in raw.splitlines():
+        if prefix not in line:
+            continue
+        return [tok.lstrip("#") for tok in line.split() if tok.startswith("#")]
+    return []
+
+
 def build_integrations_manifest(vm_name: str, vm_tags: list[str]) -> dict:
     """Return a redacted manifest of integrations visible to this VM.
 
