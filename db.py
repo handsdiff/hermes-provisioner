@@ -1,6 +1,7 @@
 """SQLite agent database."""
 
 import sqlite3
+import time
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "agents.db"
@@ -31,6 +32,32 @@ def _connect() -> sqlite3.Connection:
             con.execute(f'ALTER TABLE agents ADD COLUMN {col} TEXT DEFAULT ""')
         except sqlite3.OperationalError:
             pass
+    # Layer 0 self-serve integration flow (2026-04-18).
+    # agent_secrets: maps the X-Agent-Secret header value the platform-<vm>
+    # integration injects → the vm_name that owns it. Used to authenticate
+    # agent-originated credential requests.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS agent_secrets (
+            secret TEXT PRIMARY KEY,
+            vm_name TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL
+        )
+    """)
+    # credential_requests: one-time tokens the agent hands to its owner via
+    # chat. Owner clicks the setup URL, pastes the key into a form, submit
+    # calls `exe.dev integrations add`.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS credential_requests (
+            token TEXT PRIMARY KEY,
+            vm_name TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            target_url TEXT NOT NULL,
+            description TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used_at INTEGER
+        )
+    """)
     con.commit()
     return con
 
@@ -140,3 +167,80 @@ _PRIVATE_FIELDS = {"hub_secret", "telegram_bot_token", "owner_email", "owner_tel
 def public_agent_info(agent: dict) -> dict:
     """Strip private fields from an agent record for API responses."""
     return {k: v for k, v in agent.items() if k not in _PRIVATE_FIELDS}
+
+
+# ---------------------------------------------------------------------------
+# Layer 0 — self-serve integration flow
+# ---------------------------------------------------------------------------
+
+
+def set_agent_secret(vm_name: str, secret: str) -> None:
+    con = _connect()
+    con.execute(
+        """INSERT INTO agent_secrets (secret, vm_name, created_at) VALUES (?, ?, ?)
+           ON CONFLICT(vm_name) DO UPDATE SET secret=excluded.secret,
+                                              created_at=excluded.created_at""",
+        (secret, vm_name, int(time.time())),
+    )
+    con.commit()
+    con.close()
+
+
+def vm_for_agent_secret(secret: str) -> str | None:
+    con = _connect()
+    row = con.execute(
+        "SELECT vm_name FROM agent_secrets WHERE secret = ?", (secret,)
+    ).fetchone()
+    con.close()
+    return row["vm_name"] if row else None
+
+
+def delete_agent_secret(vm_name: str) -> bool:
+    con = _connect()
+    cur = con.execute("DELETE FROM agent_secrets WHERE vm_name = ?", (vm_name,))
+    con.commit()
+    deleted = cur.rowcount > 0
+    con.close()
+    return deleted
+
+
+def save_credential_request(
+    token: str, vm_name: str, service_name: str, target_url: str,
+    description: str, ttl_seconds: int = 900,
+) -> int:
+    now = int(time.time())
+    expires_at = now + ttl_seconds
+    con = _connect()
+    con.execute(
+        """INSERT INTO credential_requests
+               (token, vm_name, service_name, target_url, description,
+                created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (token, vm_name, service_name, target_url, description, now, expires_at),
+    )
+    con.commit()
+    con.close()
+    return expires_at
+
+
+def get_credential_request(token: str) -> dict | None:
+    con = _connect()
+    row = con.execute(
+        "SELECT * FROM credential_requests WHERE token = ?", (token,)
+    ).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def mark_credential_request_used(token: str) -> bool:
+    """Atomically mark a token used. Returns False if already used or missing."""
+    con = _connect()
+    now = int(time.time())
+    cur = con.execute(
+        "UPDATE credential_requests SET used_at = ? WHERE token = ? AND used_at IS NULL",
+        (now, token),
+    )
+    con.commit()
+    updated = cur.rowcount > 0
+    con.close()
+    return updated

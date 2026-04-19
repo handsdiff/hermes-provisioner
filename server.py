@@ -1,15 +1,30 @@
 """Hermes Provisioning API."""
 
+import html
 import os
 import re
+import secrets
+import shlex
+import subprocess
 import threading
+import time
 import traceback
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Form, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from db import all_agents, all_humans, get_agent, set_agent_status, public_agent_info
+from db import (
+    all_agents,
+    all_humans,
+    get_agent,
+    get_credential_request,
+    mark_credential_request_used,
+    public_agent_info,
+    save_credential_request,
+    set_agent_status,
+    vm_for_agent_secret,
+)
 from provision import prepare_agent, provision_agent, destroy_agent, update_agent
 
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
@@ -184,6 +199,232 @@ def update_fleet(x_api_key: str = Header(None, alias="X-Api-Key")):
         {"ok": True, "updating": list(ready.keys()), "count": len(ready)},
         status_code=202,
     )
+
+
+# ---------------------------------------------------------------------------
+# Layer 0 — self-serve integration flow
+#
+# Agent calls POST /integrations/request (authenticated via the per-agent
+# platform-<vm> integration that injects X-Agent-Secret). The response
+# contains a one-time URL the agent hands to its owner in chat. The owner
+# clicks, pastes the credential into a form, submits. The form POST creates
+# an exe.dev integration scoped to that agent's VM.
+#
+# Nothing here stores the credential: the paste goes directly into the
+# `integrations add` CLI call. The VM still holds zero secrets.
+# ---------------------------------------------------------------------------
+
+SETUP_PUBLIC_BASE = os.environ.get("SETUP_PUBLIC_BASE", "https://provision.slate.ceo")
+_SERVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
+_CRED_REQUEST_TTL = 900  # 15 minutes
+
+
+def _validate_service_name(service_name: str) -> str:
+    service_name = (service_name or "").lower().strip()
+    if not _SERVICE_NAME_RE.fullmatch(service_name):
+        raise HTTPException(
+            status_code=400,
+            detail="service_name must be 1-20 chars, lowercase alphanumeric + hyphens, starting with letter/digit",
+        )
+    return service_name
+
+
+def _validate_target_url(target_url: str) -> str:
+    target_url = (target_url or "").strip()
+    if not target_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="target_url must start with https://")
+    # exe.dev requires scheme + host only (no path). Match the existing rule
+    # documented in README.md → exe.dev gotchas.
+    without_scheme = target_url[len("https://"):]
+    if "/" in without_scheme.rstrip("/"):
+        raise HTTPException(
+            status_code=400,
+            detail="target_url must be scheme + host only (no path)",
+        )
+    return target_url.rstrip("/")
+
+
+@app.post("/integrations/request")
+async def request_credential(
+    request: Request,
+    x_agent_secret: str = Header(None, alias="X-Agent-Secret"),
+):
+    """Agent-authenticated. Mint a one-time setup URL for a missing credential.
+
+    Invoked via the per-agent platform-<vm> exe.dev integration which injects
+    the X-Agent-Secret header. The agent shares the returned setup_url with
+    its owner in chat; the owner clicks through to paste the credential.
+    """
+    if not x_agent_secret:
+        raise HTTPException(status_code=401, detail="X-Agent-Secret header required")
+    vm_name = vm_for_agent_secret(x_agent_secret)
+    if not vm_name:
+        raise HTTPException(status_code=401, detail="Unknown agent secret")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    service_name = _validate_service_name(body.get("service_name", ""))
+    target_url = _validate_target_url(body.get("target_url", ""))
+    description = (body.get("description") or "").strip()[:500]
+
+    token = secrets.token_urlsafe(24)
+    expires_at = save_credential_request(
+        token, vm_name, service_name, target_url, description,
+        ttl_seconds=_CRED_REQUEST_TTL,
+    )
+    return JSONResponse({
+        "setup_url": f"{SETUP_PUBLIC_BASE}/integrations/setup/{token}",
+        "expires_at": expires_at,
+        "service_name": service_name,
+        "vm_name": vm_name,
+    })
+
+
+def _render_setup_page(req: dict, error: str | None = None) -> str:
+    service = html.escape(req["service_name"])
+    target = html.escape(req["target_url"])
+    desc = html.escape(req["description"] or "(no description)")
+    vm = html.escape(req["vm_name"])
+    err_html = f'<p class="err">{html.escape(error)}</p>' if error else ""
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Set up {service} for {vm}</title>
+<style>
+ body{{font-family:system-ui,sans-serif;max-width:560px;margin:4em auto;padding:0 1em;color:#222}}
+ h1{{font-size:1.4em}}
+ dl{{background:#f5f5f5;padding:1em;border-radius:6px}}
+ dt{{font-weight:600;margin-top:.4em}}
+ dd{{margin:0 0 .3em}}
+ input[type=text]{{width:100%;padding:.6em;font-family:monospace;font-size:1em;box-sizing:border-box}}
+ button{{margin-top:1em;padding:.6em 1.2em;font-size:1em;cursor:pointer}}
+ .err{{color:#b00;background:#fee;padding:.6em;border-radius:4px}}
+ .note{{font-size:.85em;color:#666;margin-top:1.5em}}
+</style></head>
+<body>
+<h1>Grant <code>{service}</code> access to agent <code>{vm}</code></h1>
+<p>Paste the credential below. It goes directly to the platform's
+integration layer — not into any chat log or agent memory.</p>
+<dl>
+  <dt>Agent</dt><dd><code>{vm}</code></dd>
+  <dt>Service</dt><dd><code>{service}</code></dd>
+  <dt>Target URL</dt><dd><code>{target}</code></dd>
+  <dt>What the agent says it's for</dt><dd>{desc}</dd>
+</dl>
+{err_html}
+<form method="POST" autocomplete="off">
+  <label for="credential"><strong>Credential</strong> (API key, token, etc.):</label><br>
+  <input type="text" id="credential" name="credential" autocomplete="off" spellcheck="false" required>
+  <button type="submit">Grant access</button>
+</form>
+<p class="note">This link is single-use and expires in 15 minutes. The
+credential will be injected by the platform as
+<code>Authorization: Bearer &lt;value&gt;</code>.</p>
+</body></html>"""
+
+
+def _render_result_page(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{html.escape(title)}</title>
+<style>
+ body{{font-family:system-ui,sans-serif;max-width:560px;margin:4em auto;padding:0 1em;color:#222}}
+ h1{{font-size:1.4em}}
+ .ok{{color:#060}}
+ .err{{color:#b00}}
+</style></head><body>{body}</body></html>"""
+
+
+def _token_validity_error(req: dict | None) -> str | None:
+    if not req:
+        return "Unknown or revoked setup link."
+    if req.get("used_at"):
+        return "This setup link has already been used."
+    if int(time.time()) >= req["expires_at"]:
+        return "This setup link has expired. Ask the agent for a new one."
+    return None
+
+
+@app.get("/integrations/setup/{token}", response_class=HTMLResponse)
+def integrations_setup_form(token: str):
+    req = get_credential_request(token)
+    err = _token_validity_error(req)
+    if err:
+        return HTMLResponse(
+            _render_result_page("Setup link unavailable",
+                                f'<h1 class="err">Setup link unavailable</h1><p>{html.escape(err)}</p>'),
+            status_code=410,
+        )
+    return HTMLResponse(_render_setup_page(req))
+
+
+@app.post("/integrations/setup/{token}", response_class=HTMLResponse)
+def integrations_setup_submit(token: str, credential: str = Form(...)):
+    req = get_credential_request(token)
+    err = _token_validity_error(req)
+    if err:
+        return HTMLResponse(
+            _render_result_page("Setup link unavailable",
+                                f'<h1 class="err">Setup link unavailable</h1><p>{html.escape(err)}</p>'),
+            status_code=410,
+        )
+    credential = (credential or "").strip()
+    if not credential:
+        return HTMLResponse(
+            _render_setup_page(req, error="Paste the credential before submitting."),
+            status_code=400,
+        )
+    # Single-use: mark before the side effect. If the CLI call fails, the
+    # user can ask the agent for a fresh link — cheaper than risking a
+    # double-create.
+    if not mark_credential_request_used(token):
+        return HTMLResponse(
+            _render_result_page("Setup link unavailable",
+                                '<h1 class="err">Already used</h1><p>This link was used by another tab.</p>'),
+            status_code=410,
+        )
+
+    vm = req["vm_name"]
+    service = req["service_name"]
+    integration_name = f"{service}-{vm}"
+    # `ssh exe.dev <argv...>` concatenates and re-parses on the remote side,
+    # so credential/target (which may contain shell-sensitive chars) need
+    # remote-shell quoting. service/vm/integration_name are already
+    # validated to [a-z0-9-] + fixed shape, but quote uniformly for safety.
+    remote_cmd = " ".join([
+        "integrations", "add", "http-proxy",
+        shlex.quote(f"--name={integration_name}"),
+        shlex.quote(f"--target={req['target_url']}"),
+        shlex.quote(f"--bearer={credential}"),
+        shlex.quote(f"--attach=vm:{vm}"),
+    ])
+    try:
+        result = subprocess.run(
+            ["ssh", "exe.dev", remote_cmd],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return HTMLResponse(
+            _render_result_page("Setup failed",
+                                '<h1 class="err">Setup timed out</h1><p>The platform didn\'t respond within 30 seconds. Ask the agent for a new link and try again.</p>'),
+            status_code=504,
+        )
+    if result.returncode != 0:
+        err_text = (result.stderr or result.stdout or "unknown error").strip()
+        # Don't echo the whole stderr — it may contain details we'd rather
+        # not render. Pattern-match the common cases.
+        msg = "The platform rejected the integration."
+        if "already exists" in err_text.lower() or "duplicate" in err_text.lower():
+            msg = f"An integration named <code>{html.escape(integration_name)}</code> already exists. Ask the agent to pick a different service name."
+        return HTMLResponse(
+            _render_result_page("Setup failed",
+                                f'<h1 class="err">Setup failed</h1><p>{msg}</p>'),
+            status_code=502,
+        )
+    return HTMLResponse(_render_result_page(
+        "Setup complete",
+        f'<h1 class="ok">Access granted</h1>'
+        f'<p>Agent <code>{html.escape(vm)}</code> now has access to <code>{html.escape(service)}</code>. It can call <code>{html.escape(req["target_url"])}</code> through the platform proxy on its next turn — you can close this tab.</p>',
+    ))
 
 
 if __name__ == "__main__":

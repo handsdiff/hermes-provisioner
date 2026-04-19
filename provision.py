@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -14,7 +15,7 @@ import httpx
 
 TAG = "slate-1"
 HUB_BASE_URL = "http://127.0.0.1:8081"  # Hub on localhost, avoid Cloudflare
-from db import save_agent
+from db import delete_agent_secret, save_agent, set_agent_secret
 TG_SESSION_PATH = str(Path("/opt/spice/prod/devops/session"))
 TG_API_ID = int(os.environ.get("TG_API_ID", "0"))
 TG_API_HASH = os.environ.get("TG_API_HASH", "")
@@ -87,6 +88,7 @@ def ssh_vm(name, script, timeout=300):
 # first matching prefix wins. Keep these customer-facing.
 _INTEGRATION_PURPOSE_BY_PREFIX = [
     ("hub-",          "Send messages to other agents on Hub + Hub MCP tools."),
+    ("platform-",     "Call provision.slate.ceo. Use POST /integrations/request to mint a one-time setup URL so your owner can grant you a new credential without pasting it into chat."),
     ("tg-",           "Send Telegram messages via the rewriter proxy."),
     ("db-",           "Run SQL queries against your provisioned Postgres (read/write per grant)."),
     ("x-",            "Post to and read from X (Twitter) via the v2 API."),
@@ -416,6 +418,22 @@ def provision_agent(name, email, vm_name, display_name, prep):
             timeout=15,
         )
 
+    # Per-agent platform admin integration — backs the Layer 0 self-serve
+    # flow. The agent calls platform-<vm>.int.exe.xyz/integrations/request
+    # to mint a one-time setup URL for its owner; exe.dev injects
+    # X-Agent-Secret which the server maps back to the VM.
+    print(f"Creating per-agent platform integration...")
+    platform_secret = f"sk-layer0-{secrets.token_urlsafe(24)}"
+    set_agent_secret(vm_name, platform_secret)
+    run(
+        f"ssh exe.dev integrations add http-proxy"
+        f" --name=platform-{vm_name}"
+        f" --target=https://provision.slate.ceo"
+        f" --header=X-Agent-Secret:{platform_secret}"
+        f" --attach=vm:{vm_name}",
+        timeout=15,
+    )
+
     # 9. Enable email
     print("Enabling inbound email...")
     run(f"ssh exe.dev share receive-email {vm_name} on", timeout=10)
@@ -496,6 +514,9 @@ def destroy_agent(vm_name):
     print(f"Removing per-agent integrations...")
     run(f"ssh exe.dev integrations remove hub-{vm_name}", timeout=15, check=False)
     run(f"ssh exe.dev integrations remove tg-{vm_name}", timeout=15, check=False)
+    run(f"ssh exe.dev integrations remove platform-{vm_name}", timeout=15, check=False)
+    # Free the agent_secret row so a reused vm_name gets a fresh secret.
+    delete_agent_secret(vm_name)
     print(f"Deleting VM '{vm_name}'...")
     run(f"ssh exe.dev rm {vm_name}", timeout=30)
     print(f"  VM deleted")

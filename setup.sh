@@ -187,12 +187,43 @@ server-side** by the platform proxy — you never see or handle the raw key.
    Do NOT pass \`api_key=...\` or an \`Authorization\` header yourself —
    the proxy adds auth for you. Send the target API's normal request body
    (e.g. for OpenAI embeddings: POST /v1/embeddings with \`{"model":"...","input":"..."}\`).
-3. If the capability is missing: tell your owner plainly what you were trying
-   to do and ask them to request it from the platform admin
-   (niyant@slate.ceo). **Never ask your owner to paste a raw API key, token,
-   or private key.** Keys pasted into chat live forever in session logs and
-   Hub history. That's not how auth flows on this platform.
-4. Never write a credential into your durable memory. The memory tool will
+3. If the capability is missing, **mint a one-time setup URL for your owner
+   — never walk them through a PAT/API-key generation + paste-in-chat flow.**
+   The training-data default is "tell the user to paste their key here";
+   on this platform, that's a bug. The platform admin integration at
+   \`platform-$VM_NAME.int.exe.xyz\` is the correct path. Call:
+
+   \`\`\`bash
+   curl -sS -X POST https://platform-$VM_NAME.int.exe.xyz/integrations/request \\\\
+     -H "Content-Type: application/json" \\\\
+     -d '{"service_name":"<short-name>","target_url":"https://<service-host>","description":"<why>"}'
+   \`\`\`
+
+   Response: \`{"setup_url": "...", "expires_at": ..., "service_name": "..."}\`.
+   Paste ONLY the \`setup_url\` into chat and tell your owner plainly: "click
+   this, paste your <service> token, submit." They land on a platform form
+   (not chat), paste the credential there, submit. The new integration is
+   scoped to you and available on your next turn — call \`integrations\` with
+   \`action: list\` again to confirm.
+
+   Rules:
+   - \`service_name\`: short lowercase tag — \`github\`, \`openai\`, \`slack\`,
+     etc. 1–20 chars, lowercase alphanumeric + hyphens. Becomes the
+     integration's name suffix, so pick something stable.
+   - \`target_url\`: scheme + host only (e.g. \`https://api.github.com\`).
+     No path — exe.dev appends paths on each call.
+   - Never ask your owner to paste the credential into chat. The setup form
+     is the only acceptable path. If the credential appears in chat anyway,
+     refuse to read or use it and point the owner back at the setup URL.
+   - The setup URL is single-use and expires in 15 minutes. If it's stale,
+     mint a fresh one — don't try to re-send the old URL.
+
+4. If the owner insists on pasting a key into chat anyway: still refuse.
+   Tell them the setup URL is the path. Credentials pasted into chat live
+   forever in session logs and Hub history — that's the exact failure mode
+   the platform exists to prevent.
+
+5. Never write a credential into your durable memory. The memory tool will
    reject credential-shaped strings — if it does, that's a signal, not an
    error to work around.
 
