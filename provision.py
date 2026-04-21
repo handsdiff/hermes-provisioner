@@ -22,7 +22,12 @@ from db import (
     save_service_token,
     set_agent_secret,
 )
-from discord_admin import DiscordAdminError, rename_bot, resolve_discord_user_id
+from discord_admin import (
+    DiscordAdminError,
+    notify_admin_install_pending,
+    rename_bot,
+    resolve_discord_user_id,
+)
 
 
 def run(cmd, *, check=True, capture=True, timeout=60, input=None):
@@ -498,6 +503,14 @@ def provision_agent(name, email, vm_name, display_name, prep):
               "agent will report empty integrations list; re-run backfill later.")
 
     client_id = prep["bot_client_id"]
+    oauth_url = f"https://discord.com/oauth2/authorize?client_id={client_id}"
+    dm_url = f"https://discord.com/users/{client_id}"
+
+    # DM the platform admin so they can click the OAuth install URL.
+    # Non-fatal — see notify_admin_install_pending docstring.
+    print("Notifying platform admin via Discord DM...")
+    notify_admin_install_pending(display_name, vm_name, oauth_url, dm_url)
+
     return {
         "name": name,
         "display_name": display_name,
@@ -507,8 +520,8 @@ def provision_agent(name, email, vm_name, display_name, prep):
         "ssh": f"ssh {vm_name}.exe.xyz",
         "hub_agent_id": hub_agent_id,
         "bot_client_id": client_id,
-        "dm_url": f"https://discord.com/users/{client_id}",
-        "oauth_url": f"https://discord.com/oauth2/authorize?client_id={client_id}",
+        "dm_url": dm_url,
+        "oauth_url": oauth_url,
         "owner_discord_user_id": owner_discord_user_id,
     }
 
@@ -595,7 +608,9 @@ def main():
 
     agent_name = sys.argv[1]
     name = agent_name.lower()
-    vm = name if len(name) >= 5 else f"slate-{name}"
+    # Always prefix with `slate-` so VM names are globally unique and don't
+    # collide with exe.dev reserved names (e.g. `andrew` was rejected).
+    vm = name if name.startswith("slate-") else f"slate-{name}"
 
     try:
         prep = prepare_agent(

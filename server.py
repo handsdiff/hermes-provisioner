@@ -64,9 +64,14 @@ def _validate_name(name: str):
 
 
 def _vm_name(name: str) -> str:
-    """Derive exe.dev VM name from agent name (lowercase, min 5 chars)."""
+    """Derive exe.dev VM name from agent name.
+
+    Always prefixed with `slate-` to keep VM names globally unique and
+    sidestep exe.dev's reserved-name collisions (e.g. `andrew` was rejected).
+    If the agent name already starts with `slate-`, it's returned as-is.
+    """
     vm = name.lower()
-    if len(vm) < 5:
+    if not vm.startswith("slate-"):
         vm = f"slate-{vm}"
     return vm
 

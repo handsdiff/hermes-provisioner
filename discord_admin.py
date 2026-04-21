@@ -21,6 +21,11 @@ SLATE_GUILD_ID = "1495468808222150796"
 _PLATFORM_ADMIN_VM = "slate-sal"
 _DISCORD_API = "https://discord.com/api/v10"
 
+# Discord user who gets DM'd when a new agent provision needs the OAuth
+# install click (bot-install requires a human with MANAGE_GUILD; see
+# reference_discord_bot_install_click.md).
+_PLATFORM_ADMIN_USER_ID = "1417636184355766305"  # handsdiff / Niyant
+
 
 class DiscordAdminError(RuntimeError):
     """Raised when a Discord admin operation fails. Carries a short
@@ -95,3 +100,42 @@ def rename_bot(bot_token: str, new_name: str) -> str:
             f"Discord rename failed: HTTP {r.status_code} {r.text[:200]}"
         )
     return str(r.json()["id"])
+
+
+def notify_admin_install_pending(
+    agent_name: str, vm_name: str, oauth_url: str, dm_url: str
+) -> None:
+    """DM the platform admin from Sal when a new agent's bot needs the
+    OAuth install click. Non-fatal — logs and returns on any failure so
+    a provisioning run doesn't get rolled back for a missed ping.
+    """
+    try:
+        token = _admin_bot_token()
+        # Open/resolve DM channel with the admin user
+        r = httpx.post(
+            f"{_DISCORD_API}/users/@me/channels",
+            headers={"Authorization": f"Bot {token}"},
+            json={"recipient_id": _PLATFORM_ADMIN_USER_ID},
+            timeout=15.0,
+        )
+        if r.status_code not in (200, 201):
+            log.warning("admin DM channel open failed: HTTP %s %s",
+                        r.status_code, r.text[:200])
+            return
+        channel_id = r.json()["id"]
+        content = (
+            f"New agent **{agent_name}** provisioned on `{vm_name}`.\n"
+            f"Click to add the bot to the Slate guild: {oauth_url}\n"
+            f"Owner DM URL (to pass along): {dm_url}"
+        )
+        r2 = httpx.post(
+            f"{_DISCORD_API}/channels/{channel_id}/messages",
+            headers={"Authorization": f"Bot {token}"},
+            json={"content": content},
+            timeout=15.0,
+        )
+        if r2.status_code not in (200, 201):
+            log.warning("admin DM send failed: HTTP %s %s",
+                        r2.status_code, r2.text[:200])
+    except Exception as e:  # noqa: BLE001 — deliberately swallow; non-fatal
+        log.warning("notify_admin_install_pending failed: %s", e)
