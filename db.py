@@ -76,18 +76,35 @@ def _connect() -> sqlite3.Connection:
             PRIMARY KEY (vm_name, service_name)
         )
     """)
-    # gateway_tickets: short-lived single-use tokens the agent trades for a
-    # WS handshake. Minted by server.py, consumed by dg-proxy.
+    # gateway_tickets: deprecated. Previously held single-use tokens for the
+    # Discord gateway handshake; replaced by X-Agent-Secret header auth on
+    # the per-VM `dg-<vm>.int.exe.xyz` integration. Table left in place in
+    # existing DBs (empty, unused) to avoid a forced migration.
+    #
+    # bot_pool: pre-created Discord bot applications the provisioner pulls
+    # from when a new agent signs up. Each row holds the application's
+    # client_id (also the bot's user_id for bot accounts) and the token.
+    # Status: 'available' | 'assigned' | 'retired'. Populated manually by
+    # the platform admin via `claim_available_bot`/related helpers after
+    # creating bots in the Discord Developer Portal.
     con.execute("""
-        CREATE TABLE IF NOT EXISTS gateway_tickets (
-            ticket TEXT PRIMARY KEY,
-            vm_name TEXT NOT NULL,
-            service_name TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL,
-            used_at INTEGER
+        CREATE TABLE IF NOT EXISTS bot_pool (
+            client_id TEXT PRIMARY KEY,
+            token TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'available',
+            assigned_vm TEXT,
+            assigned_at INTEGER,
+            notes TEXT,
+            created_at INTEGER NOT NULL
         )
     """)
+    # Owner Discord identity columns on the agents table. Added after
+    # switching from Telegram-first to Discord-first provisioning.
+    for col in ("owner_discord_username", "owner_discord_user_id", "bot_client_id"):
+        try:
+            con.execute(f'ALTER TABLE agents ADD COLUMN {col} TEXT DEFAULT ""')
+        except sqlite3.OperationalError:
+            pass
     con.commit()
     return con
 
@@ -95,26 +112,34 @@ def _connect() -> sqlite3.Connection:
 def save_agent(name: str, hub_secret: str, telegram_bot_token: str = "",
                vm_name: str = "", display_name: str = "",
                owner_email: str = "", owner_telegram: str = "",
-               owner_telegram_user_id: str = ""):
+               owner_telegram_user_id: str = "",
+               owner_discord_username: str = "",
+               owner_discord_user_id: str = "",
+               bot_client_id: str = ""):
     """Insert or update an agent record."""
     con = _connect()
     con.execute(
         """INSERT INTO agents (name, vm_name, display_name, owner_email,
                owner_telegram, owner_telegram_user_id,
+               owner_discord_username, owner_discord_user_id, bot_client_id,
                hub_secret, telegram_bot_token, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provisioning')
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning')
            ON CONFLICT(name) DO UPDATE SET
                vm_name=excluded.vm_name,
                display_name=excluded.display_name,
                owner_email=excluded.owner_email,
                owner_telegram=excluded.owner_telegram,
                owner_telegram_user_id=excluded.owner_telegram_user_id,
+               owner_discord_username=excluded.owner_discord_username,
+               owner_discord_user_id=excluded.owner_discord_user_id,
+               bot_client_id=excluded.bot_client_id,
                hub_secret=excluded.hub_secret,
                telegram_bot_token=excluded.telegram_bot_token,
                status='provisioning',
                error=''""",
         (name, vm_name, display_name, owner_email, owner_telegram,
-         owner_telegram_user_id, hub_secret, telegram_bot_token),
+         owner_telegram_user_id, owner_discord_username, owner_discord_user_id,
+         bot_client_id, hub_secret, telegram_bot_token),
     )
     con.commit()
     con.close()
@@ -163,14 +188,15 @@ _DIRECTORY_EXCLUDE = {"wait4test"}
 def all_humans() -> list[dict]:
     """Return the platform roster of humans reachable through their home agent.
 
-    Match a target human against `owner_email` (and/or `owner_telegram`).
-    `hub_agent` / `display_name` are the agent, not the human.
-    Test/infra VMs are excluded.
+    Discord is the primary reach channel — use `owner_discord_user_id` for
+    `<@USER_ID>` @mentions in the Slate Discord #general. `owner_email`
+    stays exposed as the stable human identifier. Test/infra VMs are
+    excluded.
     """
     con = _connect()
     rows = con.execute(
-        """SELECT name, display_name, owner_email, owner_telegram,
-                  owner_telegram_user_id
+        """SELECT name, display_name, owner_email,
+                  owner_discord_username, owner_discord_user_id
            FROM agents
            WHERE status = 'ready'
            ORDER BY name"""
@@ -179,8 +205,8 @@ def all_humans() -> list[dict]:
     return [
         {
             "owner_email": r["owner_email"] or "",
-            "owner_telegram": r["owner_telegram"] or "",
-            "owner_telegram_user_id": r["owner_telegram_user_id"] or "",
+            "owner_discord_username": r["owner_discord_username"] or "",
+            "owner_discord_user_id": r["owner_discord_user_id"] or "",
             "hub_agent": r["name"],
             "display_name": r["display_name"] or r["name"],
         }
@@ -223,6 +249,15 @@ def vm_for_agent_secret(secret: str) -> str | None:
     ).fetchone()
     con.close()
     return row["vm_name"] if row else None
+
+
+def agent_secret_for_vm(vm_name: str) -> str | None:
+    con = _connect()
+    row = con.execute(
+        "SELECT secret FROM agent_secrets WHERE vm_name = ?", (vm_name,)
+    ).fetchone()
+    con.close()
+    return row["secret"] if row else None
 
 
 def delete_agent_secret(vm_name: str) -> bool:
@@ -306,38 +341,81 @@ def get_service_token(vm_name: str, service_name: str) -> str | None:
     return row["token"] if row else None
 
 
-def save_gateway_ticket(
-    ticket: str, vm_name: str, service_name: str, ttl_seconds: int = 60,
-) -> int:
-    now = int(time.time())
-    expires_at = now + ttl_seconds
+# ---------------------------------------------------------------------------
+# Bot pool — pre-created Discord bots the provisioner assigns to new agents
+# ---------------------------------------------------------------------------
+
+
+def add_bot_to_pool(client_id: str, token: str, notes: str = "") -> None:
+    """Seed a new row in bot_pool. Call this after manually creating a bot
+    in the Discord Developer Portal."""
     con = _connect()
     con.execute(
-        """INSERT INTO gateway_tickets
-               (ticket, vm_name, service_name, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (ticket, vm_name, service_name, now, expires_at),
+        """INSERT INTO bot_pool (client_id, token, status, notes, created_at)
+           VALUES (?, ?, 'available', ?, ?)
+           ON CONFLICT(client_id) DO NOTHING""",
+        (client_id, token, notes, int(time.time())),
     )
     con.commit()
     con.close()
-    return expires_at
 
 
-def consume_gateway_ticket(ticket: str) -> dict | None:
-    """Atomically look up + mark-used. Returns the row if valid, else None."""
+def claim_available_bot(vm_name: str) -> dict | None:
+    """Atomically claim an available bot for this VM. Returns {client_id, token}
+    or None if the pool is empty. The caller is expected to rename the bot
+    via PATCH /users/@me immediately after claiming."""
     con = _connect()
-    now = int(time.time())
-    row = con.execute(
-        "SELECT * FROM gateway_tickets WHERE ticket = ?", (ticket,)
-    ).fetchone()
-    if not row or row["used_at"] is not None or now >= row["expires_at"]:
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT client_id, token FROM bot_pool WHERE status='available' "
+            "ORDER BY created_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            con.rollback()
+            return None
+        con.execute(
+            "UPDATE bot_pool SET status='assigned', assigned_vm=?, assigned_at=? "
+            "WHERE client_id=? AND status='available'",
+            (vm_name, int(time.time()), row["client_id"]),
+        )
+        con.commit()
+        return {"client_id": row["client_id"], "token": row["token"]}
+    finally:
         con.close()
-        return None
-    cur = con.execute(
-        "UPDATE gateway_tickets SET used_at = ? WHERE ticket = ? AND used_at IS NULL",
-        (now, ticket),
+
+
+def get_bot_for_vm(vm_name: str) -> dict | None:
+    """Look up the bot assigned to a VM (client_id + token). Returns None
+    if the VM has no assigned bot."""
+    con = _connect()
+    row = con.execute(
+        "SELECT client_id, token FROM bot_pool WHERE assigned_vm=? AND status='assigned'",
+        (vm_name,),
+    ).fetchone()
+    con.close()
+    return {"client_id": row["client_id"], "token": row["token"]} if row else None
+
+
+def retire_bot(client_id: str) -> None:
+    """Mark a bot as retired (e.g., on agent destruction). Bots are not
+    returned to the pool since rename quota (2/hour) and identity cleanup
+    make reuse fragile."""
+    con = _connect()
+    con.execute(
+        "UPDATE bot_pool SET status='retired' WHERE client_id=?", (client_id,)
     )
     con.commit()
-    updated = cur.rowcount > 0
     con.close()
-    return dict(row) if updated else None
+
+
+def pool_status() -> dict:
+    """Return counts by status for dashboards/ops."""
+    con = _connect()
+    rows = con.execute(
+        "SELECT status, COUNT(*) AS n FROM bot_pool GROUP BY status"
+    ).fetchall()
+    con.close()
+    return {r["status"]: r["n"] for r in rows}
+
+

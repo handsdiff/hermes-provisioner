@@ -22,7 +22,6 @@ from db import (
     mark_credential_request_used,
     public_agent_info,
     save_credential_request,
-    save_gateway_ticket,
     save_service_token,
     set_agent_status,
     vm_for_agent_secret,
@@ -102,8 +101,7 @@ def list_humans():
 def create_agent(
     agent_name: str,
     owner_email: str,
-    telegram_bot_token: str,
-    owner_telegram_username: str,
+    discord_username: str,
     x_api_key: str = Header(None, alias="X-Api-Key"),
 ):
     _check_auth(x_api_key)
@@ -113,15 +111,16 @@ def create_agent(
     if get_agent(name):
         raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
 
-    # Synchronous pre-checks: Hub registration, DB save, Telegram info.
-    # Failures here return immediately to the caller.
+    # Synchronous pre-checks: resolve Discord username, claim bot from
+    # pool + rename it, register on Hub. Any failure (owner not in Slate
+    # Discord, empty bot pool, rename rate-limit) returns immediately.
     try:
         prep = prepare_agent(
-            name, owner_email, telegram_bot_token, owner_telegram_username,
+            name, owner_email, discord_username,
             display_name=agent_name, vm_name=vm_name,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
 
     # VM creation + setup runs in background
     thread = threading.Thread(
@@ -130,8 +129,16 @@ def create_agent(
         daemon=True,
     )
     thread.start()
+    client_id = prep["bot_client_id"]
     return JSONResponse(
-        {"agent_name": agent_name, "name": name, "vm_name": vm_name, "status": "provisioning"},
+        {
+            "agent_name": agent_name,
+            "name": name,
+            "vm_name": vm_name,
+            "status": "provisioning",
+            "dm_url": f"https://discord.com/users/{client_id}",
+            "oauth_url": f"https://discord.com/oauth2/authorize?client_id={client_id}",
+        },
         status_code=202,
     )
 
@@ -224,17 +231,14 @@ def update_fleet(x_api_key: str = Header(None, alias="X-Api-Key")):
 # ---------------------------------------------------------------------------
 
 SETUP_PUBLIC_BASE = os.environ.get("SETUP_PUBLIC_BASE", "https://provision.slate.ceo")
-DG_GATEWAY_PUBLIC_URL = os.environ.get(
-    "DG_GATEWAY_PUBLIC_URL", "wss://discord-gateway.slate.ceo"
-)
 _SERVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
 _AUTH_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,19}$")
 _CRED_REQUEST_TTL = 900  # 15 minutes
-_GATEWAY_TICKET_TTL = 60  # seconds
 
 # Services that need a gateway proxy (not just HTTP Bearer injection). For
 # these, the Layer 0 submit also stashes the raw token in
-# agent_service_tokens so dg-proxy can rewrite IDENTIFY frames.
+# agent_service_tokens and creates a per-VM `dg-<vm>` integration so
+# dg-proxy can authenticate the agent and rewrite IDENTIFY frames.
 _GATEWAY_PROXIED_SERVICES = {"discord"}
 
 
@@ -469,6 +473,37 @@ def integrations_setup_submit(token: str, credential: str = Form(...)):
         except Exception as e:
             traceback.print_exc()
             print(f"service-token save failed for {vm}/{service}: {e}")
+        # Also create the per-VM `dg-<vm>` exe.dev integration that
+        # proxies the WebSocket connect to dg-proxy with X-Agent-Secret
+        # injected. Agent never sees the secret; dg-proxy validates the
+        # header and looks up the bot token server-side. Idempotent — if
+        # the integration already exists (re-paste), we skip.
+        try:
+            from db import agent_secret_for_vm
+            agent_secret = agent_secret_for_vm(vm)
+            if agent_secret:
+                dg_name = f"dg-{vm}"
+                dg_cmd = " ".join([
+                    "integrations", "add", "http-proxy",
+                    shlex.quote(f"--name={dg_name}"),
+                    shlex.quote("--target=https://discord-gateway.slate.ceo"),
+                    shlex.quote(f"--header=X-Agent-Secret:{agent_secret}"),
+                    shlex.quote(f"--attach=vm:{vm}"),
+                ])
+                dg_result = subprocess.run(
+                    ["ssh", "exe.dev", dg_cmd],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if dg_result.returncode != 0:
+                    err_text = (dg_result.stderr or dg_result.stdout or "").lower()
+                    if "already exists" not in err_text and "duplicate" not in err_text:
+                        print(f"dg integration create failed for {vm}: "
+                              f"{(dg_result.stderr or dg_result.stdout).strip()}")
+            else:
+                print(f"no agent_secret for {vm}; skipping dg-{vm} integration")
+        except Exception as e:
+            traceback.print_exc()
+            print(f"dg integration setup failed for {vm}: {e}")
     # Best-effort: refresh the VM's integrations.json so the agent sees
     # the new capability on its next `integrations list` call. Don't fail
     # the request if this doesn't work — the integration is already live;
@@ -484,43 +519,6 @@ def integrations_setup_submit(token: str, credential: str = Form(...)):
         f'<h1 class="ok">Access granted</h1>'
         f'<p>Agent <code>{html.escape(vm)}</code> now has access to <code>{html.escape(service)}</code>. It can call <code>{html.escape(req["target_url"])}</code> through the platform proxy on its next turn — you can close this tab.</p>',
     ))
-
-
-@app.post("/discord-gateway/ticket")
-async def discord_gateway_ticket(
-    request: Request,
-    x_agent_secret: str = Header(None, alias="X-Agent-Secret"),
-):
-    """Agent-authenticated. Mint a single-use, short-lived ticket the agent
-    uses to open a WebSocket to dg-proxy. The agent sends IDENTIFY with a
-    placeholder token; dg-proxy rewrites it with the real bot token
-    looked up via (vm_name, service_name) in agent_service_tokens.
-    """
-    if not x_agent_secret:
-        raise HTTPException(status_code=401, detail="X-Agent-Secret header required")
-    vm_name = vm_for_agent_secret(x_agent_secret)
-    if not vm_name:
-        raise HTTPException(status_code=401, detail="Unknown agent secret")
-
-    service = "discord"
-    from db import get_service_token as _get_service_token
-    if not _get_service_token(vm_name, service):
-        raise HTTPException(
-            status_code=409,
-            detail=f"no {service} token stored for this agent — run the /integrations/request flow first",
-        )
-
-    ticket = secrets.token_urlsafe(24)
-    expires_at = save_gateway_ticket(ticket, vm_name, service,
-                                     ttl_seconds=_GATEWAY_TICKET_TTL)
-    # Path-based so the ticket survives yarl.URL.with_query() inside
-    # discord.py, which rewrites the query string at connect time.
-    return JSONResponse({
-        "ticket": ticket,
-        "ws_url": f"{DG_GATEWAY_PUBLIC_URL}/tkt/{ticket}",
-        "expires_at": expires_at,
-        "service": service,
-    })
 
 
 if __name__ == "__main__":

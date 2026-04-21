@@ -3,9 +3,10 @@ into the outbound IDENTIFY frame, forwards everything else to Discord's
 gateway unmodified. Preserves zero-secrets on the agent VM — the bot token
 lives only in the server-side agents.db.
 
-Auth: the agent presents a one-time ticket (?ticket=...) previously minted
-by /discord-gateway/ticket on the provisioner API. Tickets are scoped to
-(vm_name, service_name='discord'), 60s TTL, single-use.
+Auth: the agent's per-VM `dg-<vm>.int.exe.xyz` exe.dev integration injects
+`X-Agent-Secret: <secret>` on the WS upgrade request. dg-proxy looks up the
+(vm, 'discord') pair and fetches the bot token for IDENTIFY rewrite. The
+agent VM itself never handles any credential — same model as the REST path.
 
 Supported Discord gateway params passed through as-is: v, encoding.
 Compression (?compress=zlib-stream) is forbidden in this MVP — we'd need to
@@ -25,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 import websockets
 
 sys.path.insert(0, str(Path(__file__).parent))
-from db import consume_gateway_ticket, get_service_token  # noqa: E402
+from db import get_service_token, vm_for_agent_secret  # noqa: E402
 
 LISTEN_HOST = os.environ.get("DG_PROXY_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("DG_PROXY_PORT", "8400"))
@@ -107,34 +108,31 @@ _live_clients: set = set()
 
 
 async def _handle(ws_client):
-    """One agent connection. Validate ticket → open upstream → pump frames."""
+    """One agent connection. Authenticate → open upstream → pump frames.
+
+    Auth: `X-Agent-Secret` header injected by the agent's per-VM
+    `dg-<vm>.int.exe.xyz` exe.dev integration.
+    """
+    headers = ws_client.request.headers if hasattr(ws_client, "request") else {}
+    agent_secret = (
+        headers.get("X-Agent-Secret")
+        or headers.get("x-agent-secret")
+        or ""
+    ).strip()
     path = ws_client.request.path if hasattr(ws_client, "request") else getattr(ws_client, "path", "/")
-    parsed = urlparse(path)
-    # Accept either /tkt/<ticket>[/...] or ?ticket=<ticket>. The path form
-    # survives yarl.URL.with_query() inside discord.py (which replaces the
-    # query string with v=/encoding=); the query form is kept for
-    # manual/scripted clients.
-    ticket = ""
-    p = parsed.path.strip("/")
-    if p.startswith("tkt/"):
-        ticket = p[len("tkt/"):].split("/")[0]
-    if not ticket:
-        qs = parse_qs(parsed.query)
-        ticket = (qs.get("ticket", [""])[0] or "").strip()
 
-    if not ticket:
-        log.warning("connect rejected: missing ticket")
-        await ws_client.close(code=4401, reason="missing ticket")
+    if not agent_secret:
+        log.warning("connect rejected: missing X-Agent-Secret")
+        await ws_client.close(code=4401, reason="missing X-Agent-Secret")
         return
 
-    row = consume_gateway_ticket(ticket)
-    if not row:
-        log.warning("connect rejected: invalid/expired ticket")
-        await ws_client.close(code=4401, reason="invalid or expired ticket")
+    vm = vm_for_agent_secret(agent_secret)
+    if not vm:
+        log.warning("connect rejected: unknown X-Agent-Secret")
+        await ws_client.close(code=4401, reason="unknown X-Agent-Secret")
         return
 
-    vm = row["vm_name"]
-    service = row["service_name"]
+    service = "discord"
     ctx = f"[{vm}/{service}]"
 
     token = get_service_token(vm, service)

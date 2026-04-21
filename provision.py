@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Create an exe.dev VM running a Hermes agent with inference, browser, Hub, and Shelley access."""
 
-import asyncio
 import json
-import os
 import re
 import secrets
 import subprocess
@@ -15,10 +13,16 @@ import httpx
 
 TAG = "slate-1"
 HUB_BASE_URL = "http://127.0.0.1:8081"  # Hub on localhost, avoid Cloudflare
-from db import delete_agent_secret, save_agent, set_agent_secret
-TG_SESSION_PATH = str(Path("/opt/spice/prod/devops/session"))
-TG_API_ID = int(os.environ.get("TG_API_ID", "0"))
-TG_API_HASH = os.environ.get("TG_API_HASH", "")
+from db import (
+    claim_available_bot,
+    delete_agent_secret,
+    get_bot_for_vm,
+    retire_bot,
+    save_agent,
+    save_service_token,
+    set_agent_secret,
+)
+from discord_admin import DiscordAdminError, rename_bot, resolve_discord_user_id
 
 
 def run(cmd, *, check=True, capture=True, timeout=60, input=None):
@@ -235,50 +239,81 @@ def register_hub_agent(agent_id, description="", capabilities=None):
 def save_agent_record(name, hub_secret, telegram_bot_token="",
                       vm_name="", display_name="",
                       owner_email="", owner_telegram="",
-                      owner_telegram_user_id=""):
+                      owner_telegram_user_id="",
+                      owner_discord_username="",
+                      owner_discord_user_id="",
+                      bot_client_id=""):
     """Save agent record to the database."""
     save_agent(name, hub_secret, telegram_bot_token,
                vm_name=vm_name, display_name=display_name,
                owner_email=owner_email, owner_telegram=owner_telegram,
-               owner_telegram_user_id=owner_telegram_user_id)
-
-
-async def resolve_telegram_user(username: str) -> tuple[int, str]:
-    """Resolve a @username to (numeric_id, first_name) via Telethon."""
-    from telethon import TelegramClient
-    if not TG_API_ID or not TG_API_HASH:
-        raise RuntimeError("TG_API_ID/TG_API_HASH not configured")
-    client = TelegramClient(TG_SESSION_PATH, TG_API_ID, TG_API_HASH)
-    await client.connect()
-    try:
-        entity = await client.get_entity(username)
-        return entity.id, (entity.first_name or "").split(" ")[0]
-    finally:
-        await client.disconnect()
+               owner_telegram_user_id=owner_telegram_user_id,
+               owner_discord_username=owner_discord_username,
+               owner_discord_user_id=owner_discord_user_id,
+               bot_client_id=bot_client_id)
 
 
 SETUP_SCRIPT = (Path(__file__).parent / "setup.sh").read_text()
 
 
-def prepare_agent(name, email, telegram_bot_token="", telegram_username="",
-                  display_name="", vm_name=""):
-    """Fast pre-checks: Hub registration, DB save, Telegram info.
+def prepare_agent(name, email, discord_username, display_name="", vm_name=""):
+    """Fast pre-checks for Discord-first provisioning.
 
-    Called synchronously before returning 202. Raises on failure so the
-    user gets an immediate error response instead of a silent background failure.
+    Resolves the owner's Discord user_id against the Slate guild, claims
+    a bot from the pool, renames it, and saves the agent record. All
+    synchronous so failures (user not in Slate, empty pool, rename rate
+    limit) return immediately to the API caller instead of a silent
+    background blowup.
 
-    Returns a context dict consumed by provision_agent().
+    Returns a context dict consumed by `provision_agent()`.
     """
     if not display_name:
         display_name = name
     if not vm_name:
         vm_name = name
+    if not discord_username:
+        raise RuntimeError("discord_username is required")
 
-    # Sanitize inputs
-    if telegram_bot_token:
-        telegram_bot_token = telegram_bot_token.strip()
+    # 1. Resolve the owner's Discord username → user_id (requires they've
+    # joined the Slate guild — that's the onboarding prerequisite).
+    print(f"Resolving Discord username @{discord_username}...")
+    resolved = resolve_discord_user_id(discord_username)
+    if not resolved:
+        raise RuntimeError(
+            f"Discord user '{discord_username}' not found in the Slate guild. "
+            "They need to join the Slate Discord first, then retry."
+        )
+    owner_discord_user_id = resolved["user_id"]
+    owner_discord_username = resolved["username"]
+    owner_name = (resolved.get("global_name") or owner_discord_username).split()[0].title()
+    print(f"  Resolved: {owner_discord_username} (id={owner_discord_user_id}, name={owner_name!r})")
 
-    # 1. Register agent on Hub
+    # 2. Claim a bot from the pool and rename it to the agent's display name.
+    print("Claiming bot from pool...")
+    bot = claim_available_bot(vm_name)
+    if not bot:
+        raise RuntimeError(
+            "Discord bot pool is empty. Platform admin needs to add more "
+            "bots via `db.add_bot_to_pool(client_id, token)`."
+        )
+    client_id = bot["client_id"]
+    bot_token = bot["token"]
+    print(f"  Claimed client_id={client_id}")
+    try:
+        renamed_id = rename_bot(bot_token, display_name)
+    except DiscordAdminError as e:
+        # Bot is still marked assigned in DB — retire it so we don't try
+        # to reuse a known-broken bot. Operator can inspect notes to
+        # decide whether to un-retire.
+        retire_bot(client_id)
+        raise RuntimeError(f"Bot rename failed for {display_name}: {e}") from e
+    if renamed_id != client_id:
+        # For bot accounts client_id == user_id; mismatch would be surprising
+        # but non-fatal — keep going and trust the PATCH response.
+        print(f"  WARNING: PATCH /users/@me returned id {renamed_id}, expected {client_id}")
+    print(f"  Bot renamed to '{display_name}'")
+
+    # 3. Register agent on Hub
     print("Registering agent on Hub...")
     hub_agent_id, hub_secret = register_hub_agent(
         name,
@@ -286,101 +321,27 @@ def prepare_agent(name, email, telegram_bot_token="", telegram_username="",
     )
     print(f"  Hub agent: {hub_agent_id}")
 
-    # 2. Validate bot token and get bot info
-    telegram_bot_username = ""
-    if telegram_bot_token:
-        resp = httpx.post(
-            f"https://api.telegram.org/bot{telegram_bot_token}/getMe",
-            timeout=10.0,
-        )
-        data = resp.json()
-        if not data.get("ok"):
-            raise RuntimeError(f"Invalid Telegram bot token: {data.get('description', 'getMe failed')}")
-        telegram_bot_username = data["result"].get("username", "")
-        print(f"  Bot username: @{telegram_bot_username}")
-
-        # Rename bot to display_name
-        print(f"Renaming Telegram bot to '{display_name}'...")
-        try:
-            resp = httpx.post(
-                f"https://api.telegram.org/bot{telegram_bot_token}/setMyName",
-                json={"name": display_name},
-                timeout=10.0,
-            )
-            if resp.json().get("ok"):
-                print(f"  Bot renamed to '{display_name}'")
-            else:
-                print(f"  Warning: rename failed: {resp.json()}")
-        except Exception as e:
-            print(f"  Warning: could not rename bot: {e}")
-
-    # 3. Resolve Telegram username → numeric ID (for home_channel + directory)
-    telegram_user_id = ""
-    owner_name = ""
-    if telegram_username and telegram_bot_token:
-        print(f"Resolving Telegram user @{telegram_username.lstrip('@')}...")
-        try:
-            tg_id, tg_name = asyncio.run(
-                resolve_telegram_user(f"@{telegram_username.lstrip('@')}")
-            )
-            telegram_user_id = str(tg_id)
-            owner_name = tg_name
-            print(f"  Resolved: {owner_name} (id: {telegram_user_id})")
-        except Exception as e:
-            print(f"  Warning: could not resolve @{telegram_username}: {e}")
-
-    # 4. Save credentials to DB (user_id persisted so /humans can expose it)
-    save_agent_record(name, hub_secret, telegram_bot_token,
-                      vm_name=vm_name, display_name=display_name,
-                      owner_email=email, owner_telegram=telegram_username,
-                      owner_telegram_user_id=telegram_user_id)
-    print("  Credentials saved to DB")
-
-    # 5. Build Telegram config blocks (empty if no bot token)
-    if telegram_bot_token:
-        home_channel_block = ""
-        if telegram_user_id:
-            home_channel_block = (
-                '    home_channel:\n'
-                f'      chat_id: "{telegram_user_id}"\n'
-                '      name: "Home"\n'
-                '      platform: telegram\n'
-            )
-        telegram_config = (
-            '  telegram:\n'
-            '    enabled: true\n'
-            '    token: "unused"\n'
-            + home_channel_block +
-            '    extra:\n'
-            f'      base_url: "https://tg-{vm_name}.int.exe.xyz/bot"\n'
-            f'      base_file_url: "https://tg-{vm_name}.int.exe.xyz/file/bot"\n'
-        )
-        if telegram_bot_username:
-            soul_telegram = (
-                f'- **Telegram** — how humans reach you. Your bot: @{telegram_bot_username}\n'
-                f'  (https://t.me/{telegram_bot_username}). Anyone can message you.\n'
-                '  Welcome them — they might be users, collaborators, or people your\n'
-                '  owner should know about.\n'
-            )
-        else:
-            soul_telegram = (
-                '- **Telegram** — how humans reach you. Anyone can message your bot.\n'
-                '  Welcome them — they might be users, collaborators, or people your\n'
-                '  owner should know about.\n'
-            )
-        print(f"  Telegram bot token provided — will configure Telegram platform")
-    else:
-        telegram_config = ""
-        soul_telegram = ""
+    # 4. Save agent + real bot token to DB. dg-proxy reads the token when
+    # a Discord WebSocket opens from this VM's dg-<vm> integration.
+    save_agent_record(
+        name, hub_secret, telegram_bot_token="",
+        vm_name=vm_name, display_name=display_name,
+        owner_email=email,
+        owner_discord_username=owner_discord_username,
+        owner_discord_user_id=owner_discord_user_id,
+        bot_client_id=client_id,
+    )
+    save_service_token(vm_name, "discord", bot_token)
+    print("  Agent record + bot token saved to DB")
 
     return {
         "hub_agent_id": hub_agent_id,
         "hub_secret": hub_secret,
-        "telegram_bot_token": telegram_bot_token,
-        "telegram_bot_username": telegram_bot_username,
-        "telegram_config": telegram_config,
-        "soul_telegram": soul_telegram,
         "owner_name": owner_name,
+        "owner_discord_username": owner_discord_username,
+        "owner_discord_user_id": owner_discord_user_id,
+        "bot_client_id": client_id,
+        "bot_token": bot_token,
     }
 
 
@@ -392,10 +353,9 @@ def provision_agent(name, email, vm_name, display_name, prep):
     """
     hub_agent_id = prep["hub_agent_id"]
     hub_secret = prep["hub_secret"]
-    telegram_config = prep["telegram_config"]
-    soul_telegram = prep["soul_telegram"]
     owner_name = prep["owner_name"]
-    telegram_bot_token = prep.get("telegram_bot_token", "")
+    owner_discord_user_id = prep["owner_discord_user_id"]
+    bot_token = prep["bot_token"]
 
     # 6. Create VM
     print(f"Creating VM '{vm_name}'...")
@@ -412,7 +372,7 @@ def provision_agent(name, email, vm_name, display_name, prep):
     run(f"ssh exe.dev tag {vm_name} slate-3", timeout=10)
     run(f"ssh exe.dev tag {vm_name} langfuse", timeout=10)
 
-    # 8. Create per-agent integrations (zero secrets on VM)
+    # 8. Create per-agent integrations (zero secrets on VM).
     print(f"Creating per-agent Hub integration...")
     run(
         f"ssh exe.dev integrations add http-proxy"
@@ -422,16 +382,22 @@ def provision_agent(name, email, vm_name, display_name, prep):
         f" --attach=vm:{vm_name}",
         timeout=15,
     )
-    if telegram_bot_token:
-        print(f"Creating per-agent Telegram integration...")
-        run(
-            f"ssh exe.dev integrations add http-proxy"
-            f" --name=tg-{vm_name}"
-            f" --target=https://proxy.slate.ceo"
-            f" --header=X-Bot-Token:{telegram_bot_token}"
-            f" --attach=vm:{vm_name}",
-            timeout=15,
-        )
+
+    # Discord REST — exe.dev injects the bot token server-side.
+    print(f"Creating per-agent Discord REST integration...")
+    import shlex as _shlex
+    _auth_header = _shlex.quote(f"--header=Authorization:Bot {bot_token}")
+    run(
+        ["ssh", "exe.dev",
+         " ".join([
+             "integrations", "add", "http-proxy",
+             f"--name=discord-{vm_name}",
+             "--target=https://discord.com",
+             _auth_header,
+             f"--attach=vm:{vm_name}",
+         ])],
+        timeout=15,
+    )
 
     # Per-agent platform admin integration — backs the Layer 0 self-serve
     # flow. The agent calls platform-<vm>.int.exe.xyz/integrations/request
@@ -444,6 +410,19 @@ def provision_agent(name, email, vm_name, display_name, prep):
         f"ssh exe.dev integrations add http-proxy"
         f" --name=platform-{vm_name}"
         f" --target=https://provision.slate.ceo"
+        f" --header=X-Agent-Secret:{platform_secret}"
+        f" --attach=vm:{vm_name}",
+        timeout=15,
+    )
+
+    # Discord gateway proxy — the agent opens a WS to dg-<vm>.int.exe.xyz;
+    # exe.dev injects X-Agent-Secret on the upgrade request; dg-proxy
+    # validates it + stamps the IDENTIFY frame with the real bot token.
+    print(f"Creating per-agent Discord gateway integration...")
+    run(
+        f"ssh exe.dev integrations add http-proxy"
+        f" --name=dg-{vm_name}"
+        f" --target=https://discord-gateway.slate.ceo"
         f" --header=X-Agent-Secret:{platform_secret}"
         f" --attach=vm:{vm_name}",
         timeout=15,
@@ -473,17 +452,27 @@ def provision_agent(name, email, vm_name, display_name, prep):
         raise RuntimeError(f"VM '{vm_name}' cannot resolve DNS after 30s")
     print("  DNS ready")
 
-    # 13. Run setup
+    # 13. Copy dg_patch.py to the VM before running setup. setup.sh places
+    # it into the venv's site-packages + writes the .pth so discord.py is
+    # routed through dg-proxy from the moment Hermes first starts.
+    print("Copying dg_patch.py to VM...")
+    run(
+        ["scp", "-o", "StrictHostKeyChecking=no",
+         str(Path(__file__).parent / "dg_patch.py"),
+         f"{vm_name}.exe.xyz:/tmp/dg_patch.py"],
+        timeout=30,
+    )
+
+    # 14. Run setup
     print("Running setup (this takes a few minutes)...")
     script = (
         SETUP_SCRIPT
         .replace("{display_name}", display_name)
         .replace("{vm_name}", vm_name)
         .replace("{hub_agent_id}", hub_agent_id)
-        .replace("{telegram_config}", telegram_config)
-        .replace("{soul_telegram}", soul_telegram)
         .replace("{owner_email}", email)
         .replace("{owner_name}", owner_name or email)
+        .replace("{owner_discord_user_id}", owner_discord_user_id)
     )
     ssh_vm(vm_name, script, timeout=600)
 
@@ -508,6 +497,7 @@ def provision_agent(name, email, vm_name, display_name, prep):
         print(f"  WARNING: manifest write failed ({exc}). Not fatal — "
               "agent will report empty integrations list; re-run backfill later.")
 
+    client_id = prep["bot_client_id"]
     return {
         "name": name,
         "display_name": display_name,
@@ -516,7 +506,10 @@ def provision_agent(name, email, vm_name, display_name, prep):
         "shelley": f"https://{vm_name}.shelley.exe.xyz/",
         "ssh": f"ssh {vm_name}.exe.xyz",
         "hub_agent_id": hub_agent_id,
-        "telegram_configured": bool(telegram_bot_token),
+        "bot_client_id": client_id,
+        "dm_url": f"https://discord.com/users/{client_id}",
+        "oauth_url": f"https://discord.com/oauth2/authorize?client_id={client_id}",
+        "owner_discord_user_id": owner_discord_user_id,
     }
 
 
@@ -527,9 +520,14 @@ def destroy_agent(vm_name):
     DB cleanup is handled by the caller.
     """
     print(f"Removing per-agent integrations...")
-    run(f"ssh exe.dev integrations remove hub-{vm_name}", timeout=15, check=False)
-    run(f"ssh exe.dev integrations remove tg-{vm_name}", timeout=15, check=False)
-    run(f"ssh exe.dev integrations remove platform-{vm_name}", timeout=15, check=False)
+    for integ in (
+        f"hub-{vm_name}",
+        f"tg-{vm_name}",          # legacy — pre-Discord-first agents
+        f"platform-{vm_name}",
+        f"discord-{vm_name}",     # REST (created post-provision via Layer 0)
+        f"dg-{vm_name}",          # gateway (created post-provision via Layer 0)
+    ):
+        run(f"ssh exe.dev integrations remove {integ}", timeout=15, check=False)
     # Free the agent_secret row so a reused vm_name gets a fresh secret.
     delete_agent_secret(vm_name)
     print(f"Deleting VM '{vm_name}'...")
@@ -538,12 +536,23 @@ def destroy_agent(vm_name):
     return {"vm_name": vm_name, "deleted": True}
 
 
+# UPDATE_SCRIPT runs on the VM after provision.py scps a fresh dg_patch.py
+# to /tmp/dg_patch.py. The script reinstalls hermes, ensures discord.py is
+# present, refreshes dg_patch.py in site-packages, and restarts the service.
 UPDATE_SCRIPT = (
     "cd ~/.hermes/hermes-agent"
     " && git fetch origin"
     " && git reset --hard origin/main"
     " && . venv/bin/activate"
     " && pip install -e '.[all]' -q"
+    " && pip install -q 'discord.py>=2.5'"
+    # Refresh dg_patch.py + .pth (idempotent; /tmp/dg_patch.py scp'd by caller)
+    " && SP=$(python -c \"import site; print([p for p in site.getsitepackages() if p.endswith('site-packages')][0])\")"
+    " && if [ -f /tmp/dg_patch.py ]; then"
+    "      cp /tmp/dg_patch.py \"$SP/dg_patch.py\";"
+    "      echo 'import dg_patch' > \"$SP/dg_patch.pth\";"
+    "      rm -f \"$SP/__pycache__/dg_patch.\"*.pyc;"
+    "    fi"
     # Ensure .env has required vars (additive, won't duplicate)
     " && grep -q '^SUDO_PASSWORD=' ~/.hermes/.env 2>/dev/null"
     "    || echo 'SUDO_PASSWORD=' >> ~/.hermes/.env"
@@ -552,13 +561,25 @@ UPDATE_SCRIPT = (
 
 
 def update_agent(vm_name):
-    """Update hermes-agent code on a VM and restart. Returns result dict."""
+    """Update hermes-agent code on a VM and restart. Returns result dict.
+
+    Also refreshes dg_patch.py on the VM — scp's the current copy from
+    the provisioner repo before running the remote update script, so
+    fleet updates pick up dg-patch changes automatically.
+    """
     print(f"Updating {vm_name}...")
     try:
-        out = run(
+        # scp the current dg_patch.py first; UPDATE_SCRIPT reads it from /tmp.
+        run(
+            ["scp", "-o", "StrictHostKeyChecking=no",
+             str(Path(__file__).parent / "dg_patch.py"),
+             f"{vm_name}.exe.xyz:/tmp/dg_patch.py"],
+            timeout=30,
+        )
+        run(
             ["ssh", "-o", "StrictHostKeyChecking=no", f"{vm_name}.exe.xyz",
              UPDATE_SCRIPT],
-            timeout=120,
+            timeout=180,
         )
         print(f"  {vm_name}: updated")
         return {"vm_name": vm_name, "status": "updated"}
@@ -568,8 +589,8 @@ def update_agent(vm_name):
 
 
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <agent-name> <user-email> [telegram-bot-token] [telegram-username]")
+    if len(sys.argv) < 4:
+        print(f"Usage: {sys.argv[0]} <agent-name> <owner-email> <owner-discord-username>")
         sys.exit(1)
 
     agent_name = sys.argv[1]
@@ -578,9 +599,7 @@ def main():
 
     try:
         prep = prepare_agent(
-            name, sys.argv[2],
-            sys.argv[3] if len(sys.argv) > 3 else "",
-            sys.argv[4] if len(sys.argv) > 4 else "",
+            name, sys.argv[2], sys.argv[3],
             display_name=agent_name,
             vm_name=vm,
         )
@@ -594,8 +613,8 @@ def main():
     print(f"  Shelley: {result['shelley']}")
     print(f"  SSH:     {result['ssh']}")
     print(f"  Hub:     agent '{result['hub_agent_id']}' on Slate Agent Hub")
-    if result["telegram_configured"]:
-        print(f"  Telegram: configured (bot token proxied)")
+    print(f"  DM URL:  {result['dm_url']}  (send to owner)")
+    print(f"  OAuth:   {result['oauth_url']}  (admin: click to add bot to Slate)")
 
 
 if __name__ == "__main__":

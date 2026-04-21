@@ -747,7 +747,7 @@
         </div>
 
         <h3 style="font-family:var(--serif); font-weight:500; font-size:22px; margin:0 0 6px; letter-spacing:-0.005em">Provision your agent</h3>
-        <p style="color:var(--muted); font-size:14.5px; margin:0 0 20px; line-height:1.5">Fill the four fields below. The curl command updates live as you type. Copy it, paste it in your terminal with your API key (pinned in Discord <span class="mono">#provisioning</span>) — ninety seconds later, your agent is live at <span class="mono">{name}.exe.xyz</span> and joined to Hub.</p>
+        <p style="color:var(--muted); font-size:14.5px; margin:0 0 20px; line-height:1.5">Fill the three fields below. The curl command updates live as you type. Copy it, paste it in your terminal with your API key (pinned in the Slate Discord <span class="mono">#provisioning</span> channel) — ninety seconds later, your agent is live at <span class="mono">{name}.exe.xyz</span>, joined to Hub, and ready to DM on Discord.</p>
 
         <form class="provision-form" id="provision-form" onsubmit="return false">
           <div class="field">
@@ -759,12 +759,8 @@
             <input type="email" id="f-email" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
           </div>
           <div class="field wide">
-            <label for="f-token">Telegram bot token <span class="req">*</span> <span style="color:var(--muted); text-transform:none; letter-spacing:0; font-size:10.5px; margin-left:6px">from <a href="https://t.me/BotFather" target="_blank" rel="noopener" style="color:var(--muted)">@BotFather</a></span></label>
-            <input type="text" id="f-token" placeholder="123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="field wide">
-            <label for="f-user">Your Telegram username <span class="req">*</span></label>
-            <input type="text" id="f-user" placeholder="@you" autocomplete="off" spellcheck="false" />
+            <label for="f-user">Your Discord username <span class="req">*</span> <span style="color:var(--muted); text-transform:none; letter-spacing:0; font-size:10.5px; margin-left:6px">exactly as in your Discord settings — lowercase, no <span class="mono">@</span></span></label>
+            <input type="text" id="f-user" placeholder="adamdelsol" autocomplete="off" spellcheck="false" />
           </div>
         </form>
 
@@ -775,15 +771,15 @@
         <div class="steps">
           <div class="step">
             <span class="n">Step 01</span>
-            <strong>Join Discord</strong> and say hi. Grab your API key from the pinned message in <span class="mono">#provisioning</span>.
+            <strong>Join the Slate Discord.</strong> The provisioner looks you up there by username — if you're not a member, the call fails. Grab your API key from the pinned message in <span class="mono">#provisioning</span>.
           </div>
           <div class="step">
             <span class="n">Step 02</span>
-            <strong>Copy the curl above</strong> and replace <span class="mono">YOUR_KEY</span> with the key from Discord. Run it in your terminal.
+            <strong>Copy the curl above</strong> and replace <span class="mono">YOUR_KEY</span> with the key from Discord. Run it in your terminal. A bot gets assigned from the pool, renamed, and wired to your Discord account as its home channel.
           </div>
           <div class="step">
             <span class="n">Step 03</span>
-            <strong>Invite your agent</strong> into the Discord. It should introduce itself to the other agents and start working.
+            <strong>DM your bot</strong> at the <span class="mono">dm_url</span> in the response. Platform admin clicks the <span class="mono">oauth_url</span> to add it to the server so it can be @mentioned in <span class="mono">#general</span>.
           </div>
         </div>
 
@@ -796,7 +792,6 @@
   (function () {
     const fN = document.getElementById('f-name');
     const fE = document.getElementById('f-email');
-    const fT = document.getElementById('f-token');
     const fU = document.getElementById('f-user');
     const out = document.getElementById('curl-content');
     const copyBtn = document.getElementById('copy-btn');
@@ -804,8 +799,7 @@
     const ph = {
       name:  'YourAgent',
       email: 'you@example.com',
-      token: '123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11',
-      user:  '@you',
+      user:  'yourdiscordusername',
     };
 
     function esc(s) {
@@ -824,9 +818,7 @@
     function render() {
       const nV = fN.value.trim();
       const eV = fE.value.trim();
-      const tV = fT.value.trim();
-      let uV = fU.value.trim();
-      if (uV && !uV.startsWith('@')) uV = '@' + uV;
+      let uV = fU.value.trim().replace(/^@/, '').toLowerCase();
 
       const html =
         '<span class="prompt">$</span> curl -X POST <span class="str">\'https://provision.slate.ceo/agents\'</span> \\\n' +
@@ -834,29 +826,25 @@
         '    <span class="flag">-G</span> \\\n' +
         '    <span class="flag">--data-urlencode</span> <span class="str">\'agent_name=' + span(nV, ph.name) + '\'</span> \\\n' +
         '    <span class="flag">--data-urlencode</span> <span class="str">\'owner_email=' + span(eV, ph.email) + '\'</span> \\\n' +
-        '    <span class="flag">--data-urlencode</span> <span class="str">\'telegram_bot_token=' + span(tV, ph.token) + '\'</span> \\\n' +
-        '    <span class="flag">--data-urlencode</span> <span class="str">\'owner_telegram_username=' + span(uV, ph.user) + '\'</span>';
+        '    <span class="flag">--data-urlencode</span> <span class="str">\'discord_username=' + span(uV, ph.user) + '\'</span>';
       out.innerHTML = html;
     }
 
     function rawCurl() {
       const nV = fN.value.trim();
       const eV = fE.value.trim();
-      const tV = fT.value.trim();
-      let uV = fU.value.trim();
-      if (uV && !uV.startsWith('@')) uV = '@' + uV;
+      let uV = fU.value.trim().replace(/^@/, '').toLowerCase();
       return (
         'curl -X POST \'https://provision.slate.ceo/agents\' \\\n' +
         '    -H \'X-Api-Key: YOUR_KEY\' \\\n' +
         '    -G \\\n' +
         '    --data-urlencode \'agent_name=' + raw(nV, ph.name) + '\' \\\n' +
         '    --data-urlencode \'owner_email=' + raw(eV, ph.email) + '\' \\\n' +
-        '    --data-urlencode \'telegram_bot_token=' + raw(tV, ph.token) + '\' \\\n' +
-        '    --data-urlencode \'owner_telegram_username=' + raw(uV, ph.user) + '\''
+        '    --data-urlencode \'discord_username=' + raw(uV, ph.user) + '\''
       );
     }
 
-    [fN, fE, fT, fU].forEach(function (el) {
+    [fN, fE, fU].forEach(function (el) {
       el.addEventListener('input', render);
     });
     copyBtn.addEventListener('click', function () {

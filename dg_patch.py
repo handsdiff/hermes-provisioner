@@ -10,11 +10,11 @@ What it changes at import time:
    never attaches an ``Authorization`` header itself. Auth is purely
    transport-layer; this VM has no bot token on it.
 
-3. Gateway WebSocket (``DiscordWebSocket.from_client`` + sharded
-   ``HTTPClient.get_bot_gateway``) mints a fresh single-use ticket per
-   connect via ``platform-<vm>.int.exe.xyz/discord-gateway/ticket`` and
-   connects to ``wss://discord-gateway.slate.ceo/tkt/<ticket>``. dg-proxy
-   on sf1 rewrites the IDENTIFY frame with the real bot token.
+3. Gateway WebSocket URL → ``wss://dg-<vm>.int.exe.xyz/``. The agent's
+   per-VM ``dg-<vm>`` exe.dev integration injects ``X-Agent-Secret`` on
+   the WS upgrade request; dg-proxy on sf1 validates the header and
+   rewrites the IDENTIFY frame with the real bot token. No credentials
+   or capabilities ever touch the agent VM — same model as the REST path.
 
 4. Gateway compression forced off — dg-proxy doesn't handle zlib-stream.
 
@@ -23,10 +23,7 @@ What it changes at import time:
    the placeholder token. dg-proxy only rewrites IDENTIFY (op 2), so a
    RESUME reaches Discord with the placeholder and gets close code 4004
    (auth failed). Forcing resume=False makes every reconnect a full
-   IDENTIFY with a fresh ticket, which the proxy does rewrite.
-
-6. Ticket minting retries transient failures (3×, 2s backoff) so a short
-   provisioner blip doesn't kill a reconnect attempt.
+   IDENTIFY, which the proxy does rewrite.
 
 Imported via a ``.pth`` file in the venv so these monkey-patches apply
 before hermes's own imports of discord.py.
@@ -34,13 +31,11 @@ before hermes's own imports of discord.py.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import socket
 
 try:
-    import aiohttp
     import yarl
     import discord  # noqa: F401 — trigger submodule loads
     import discord.http
@@ -52,8 +47,7 @@ log = logging.getLogger("dg-patch")
 
 _VM = os.environ.get("DG_PATCH_VM") or socket.gethostname()
 _HTTP_BASE = f"https://discord-{_VM}.int.exe.xyz/api/v10"
-_TICKET_URL = f"https://platform-{_VM}.int.exe.xyz/discord-gateway/ticket"
-_WS_PUBLIC_BASE = "wss://discord-gateway.slate.ceo"
+_WS_URL = f"wss://dg-{_VM}.int.exe.xyz/"
 
 # --- 1. REST base URL ------------------------------------------------------
 discord.http.Route.BASE = _HTTP_BASE
@@ -74,28 +68,7 @@ async def _patched_request(self, route, *args, **kwargs):
 discord.http.HTTPClient.request = _patched_request
 
 
-# --- 3. Gateway URL: mint a fresh ticket per connect, retry on blips ------
-async def _mint_ws_url(retries: int = 3, backoff: float = 2.0) -> str:
-    last_exc: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(_TICKET_URL) as r:
-                    r.raise_for_status()
-                    body = await r.json()
-            return body["ws_url"]
-        except Exception as e:
-            last_exc = e
-            if attempt < retries:
-                log.warning(
-                    "dg-patch: ticket mint attempt %d/%d failed (%s); retrying in %.1fs",
-                    attempt, retries, e, backoff,
-                )
-                await asyncio.sleep(backoff)
-    assert last_exc is not None
-    raise last_exc
-
-
+# --- 3. Gateway URL: always the per-VM integration. ------------------------
 _orig_from_client = discord.gateway.DiscordWebSocket.from_client.__func__
 
 
@@ -108,18 +81,12 @@ async def _patched_from_client(
     # Force compress=False: dg-proxy does not decode zlib-stream.
     # Force resume=False + drop session/sequence: RESUME frames carry the
     # placeholder token through dg-proxy un-rewritten, causing Discord to
-    # reply 4004 (auth failed). We re-IDENTIFY on every reconnect instead,
-    # minting a fresh ticket each time.
+    # reply 4004 (auth failed). We re-IDENTIFY on every reconnect instead.
     compress = False
     resume = False
     session = None
     sequence = None
-    # Always mint a fresh ticket. Any gateway URL discord.py carries over
-    # from a prior connect has an already-consumed ticket that dg-proxy
-    # will reject (4401); reusing it gives us no value. Stateless URL per
-    # from_client call.
-    url = await _mint_ws_url()
-    gateway = yarl.URL(url)
+    gateway = yarl.URL(_WS_URL)
     return await _orig_from_client(
         cls, client,
         gateway=gateway, compress=compress, resume=resume,
@@ -138,31 +105,29 @@ except Exception:
 
 
 async def _patched_get_bot_gateway(self):
-    ws_url = await _mint_ws_url()
     if SessionStartLimit is not None:
         limits = SessionStartLimit(
             total=1000, remaining=1000,
             reset_after=86_400_000, max_concurrency=1,
         )
-        return 1, ws_url, limits
-    return 1, ws_url
+        return 1, _WS_URL, limits
+    return 1, _WS_URL
 
 
 discord.http.HTTPClient.get_bot_gateway = _patched_get_bot_gateway
 
 
 async def _patched_get_gateway(self, *, encoding="json", zlib=False, v=10):
-    return await _mint_ws_url()
+    return _WS_URL
 
 
 discord.http.HTTPClient.get_gateway = _patched_get_gateway
 
 # --- 5. Fallback DEFAULT_GATEWAY (rarely used; sanity only). --------------
-discord.gateway.DiscordWebSocket.DEFAULT_GATEWAY = yarl.URL(_WS_PUBLIC_BASE + "/")
-
+discord.gateway.DiscordWebSocket.DEFAULT_GATEWAY = yarl.URL(_WS_URL)
 
 
 log.warning(
-    "dg-patch active vm=%s rest=%s ws=%s (resume disabled, ticket retry=3)",
-    _VM, _HTTP_BASE, _WS_PUBLIC_BASE,
+    "dg-patch active vm=%s rest=%s ws=%s (header auth, resume disabled)",
+    _VM, _HTTP_BASE, _WS_URL,
 )
