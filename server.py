@@ -12,6 +12,7 @@ import traceback
 
 import uvicorn
 from fastapi import FastAPI, Form, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from db import (
@@ -40,6 +41,16 @@ PROVISIONER_ADMIN_KEY = os.environ.get("PROVISIONER_ADMIN_KEY", "")
 CREATION_API_KEY = os.environ.get("CREATION_API_KEY", "")
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://slate.ceo",
+        "https://slate-sal.exe.xyz",
+    ],
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-Api-Key", "Content-Type"],
+)
 
 
 def _check_auth(api_key: str | None):

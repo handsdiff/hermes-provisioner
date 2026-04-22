@@ -262,6 +262,36 @@
   .copy-btn:hover { background: var(--paper); color: var(--accent); }
   .copy-btn.copied { background: var(--ok); color: var(--paper); }
 
+  .launch-row {
+    margin-top: 16px;
+    display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  }
+  .launch-btn {
+    background: var(--accent); color: var(--paper);
+    border: 0; border-radius: 3px;
+    padding: 12px 22px;
+    font-family: var(--mono); font-size: 13px; letter-spacing: 0.04em;
+    font-weight: 600;
+    cursor: pointer;
+    text-transform: uppercase;
+  }
+  .launch-btn:hover:not(:disabled) { background: var(--ink); }
+  .launch-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .launch-hint { color: var(--muted); font-size: 12.5px; }
+  .launch-result {
+    margin-top: 14px;
+    padding: 14px 16px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word;
+    display: none;
+  }
+  .launch-result.ok { border-color: var(--ok); }
+  .launch-result.err { border-color: #c04040; }
+  .launch-result a { color: var(--accent); }
+
   .steps {
     margin-top: 22px;
     display: grid; grid-template-columns: repeat(3, 1fr);
@@ -536,8 +566,8 @@
       <span class="subtle">We fix both at the network layer — <strong style="color:var(--ink)">machine identity</strong> so the agent never holds a secret, and <strong style="color:var(--ink)">peer labeling</strong> so every inbound has a source the prompt can't forge.</span>
     </p>
     <div class="cta">
-      <a class="btn" href="#thesis">Read the thesis →</a>
-      <a class="btn btn-discord" href="#join">Join the proving ground →</a>
+      <a class="btn" href="#join">Join the proving ground →</a>
+      <a class="btn btn-discord" href="#thesis">Read the thesis →</a>
       <span class="secondary"><span class="free-pill">FREE</span> first 100 agents · inference sponsored</span>
     </div>
   </div>
@@ -758,7 +788,7 @@
         </div>
 
         <h3 style="font-family:var(--serif); font-weight:500; font-size:22px; margin:0 0 6px; letter-spacing:-0.005em">Provision your agent</h3>
-        <p style="color:var(--muted); font-size:14.5px; margin:0 0 20px; line-height:1.5">Fill the three fields below. The curl command updates live as you type. Copy it, paste it in your terminal with your API key (pinned in the Slate Discord <span class="mono">#provisioning</span> channel) — ninety seconds later, your agent is live at <span class="mono">{name}.exe.xyz</span>, joined to Hub, and ready to DM on Discord.</p>
+        <p style="color:var(--muted); font-size:14.5px; margin:0 0 20px; line-height:1.5">Fill the fields below. The curl command updates live as you type. Your API key is pinned in the Slate Discord <span class="mono">#provisioning</span> channel — paste it here or leave it as <span class="mono">YOUR_KEY</span> and swap it in your terminal. Ninety seconds later, your agent is live at <span class="mono">{name}.exe.xyz</span>, joined to Hub, and ready to DM on Discord.</p>
 
         <form class="provision-form" id="provision-form" onsubmit="return false">
           <div class="field">
@@ -777,11 +807,21 @@
             <label for="f-desc">What would you love your agent to do? <span class="req">*</span> <span style="color:var(--muted); text-transform:none; letter-spacing:0; font-size:10.5px; margin-left:6px">one sentence or three — this becomes your agent's mission</span></label>
             <input type="text" id="f-desc" placeholder="Help me find users for the thing I'm building, and draft intros to the ones most likely to care." autocomplete="off" spellcheck="false" />
           </div>
+          <div class="field wide">
+            <label for="f-key">API key <span style="color:var(--muted); text-transform:none; letter-spacing:0; font-size:10.5px; margin-left:6px">pinned in the Slate Discord <span class="mono">#provisioning</span> channel</span></label>
+            <input type="text" id="f-key" placeholder="YOUR_KEY" autocomplete="off" spellcheck="false" />
+          </div>
         </form>
 
         <div class="curl-box" id="curl-box" style="position:relative">
           <button type="button" class="copy-btn" id="copy-btn">Copy</button>
 <span id="curl-content"></span></div>
+
+        <div class="launch-row">
+          <button type="button" class="launch-btn" id="launch-btn">Launch agent</button>
+          <span class="launch-hint">fills all four fields and click — or use the curl above in your terminal</span>
+        </div>
+        <div class="launch-result" id="launch-result"></div>
 
         <div class="steps">
           <div class="step">
@@ -790,7 +830,7 @@
           </div>
           <div class="step">
             <span class="n">Step 02</span>
-            <strong>Copy the curl above</strong> and replace <span class="mono">YOUR_KEY</span> with the key from Discord. Run it in your terminal. A bot gets assigned from the pool, renamed, and wired to your Discord account as its home channel.
+            <strong>Copy the curl above</strong> — paste your API key into the form (or swap <span class="mono">YOUR_KEY</span> in the terminal) and run it. A bot gets assigned from the pool, renamed, and wired to your Discord account as its home channel.
           </div>
           <div class="step">
             <span class="n">Step 03</span>
@@ -809,6 +849,7 @@
     const fE = document.getElementById('f-email');
     const fU = document.getElementById('f-user');
     const fD = document.getElementById('f-desc');
+    const fK = document.getElementById('f-key');
     const out = document.getElementById('curl-content');
     const copyBtn = document.getElementById('copy-btn');
 
@@ -817,6 +858,7 @@
       email: 'you@example.com',
       user:  'handsdiff',
       desc:  "Help me find users for the thing I'm building, and draft intros to the ones most likely to care.",
+      key:   'YOUR_KEY',
     };
 
     function esc(s) {
@@ -827,9 +869,11 @@
       if (!val) return '<span class="ph">' + esc(placeholder) + '</span>';
       return esc(val);
     }
-    // For clipboard: always output real values (or placeholder text verbatim).
+    // For clipboard: always output real values (or placeholder text verbatim),
+    // with single-quotes escaped POSIX-style so apostrophes (e.g. "I'm") don't
+    // break the shell's single-quoted `--data-urlencode 'k=v'` wrapping.
     function raw(val, placeholder) {
-      return val || placeholder;
+      return (val || placeholder).replace(/'/g, "'\\''");
     }
 
     function render() {
@@ -837,10 +881,11 @@
       const eV = fE.value.trim();
       let uV = fU.value.trim().replace(/^@/, '').toLowerCase();
       const dV = fD.value.trim();
+      const kV = fK.value.trim();
 
       const html =
         '<span class="prompt">$</span> curl -X POST <span class="str">\'https://provision.slate.ceo/agents\'</span> \\\n' +
-        '    <span class="flag">-H</span> <span class="str">\'X-Api-Key: <span class="ph">YOUR_KEY</span>\'</span> \\\n' +
+        '    <span class="flag">-H</span> <span class="str">\'X-Api-Key: ' + span(kV, ph.key) + '\'</span> \\\n' +
         '    <span class="flag">-G</span> \\\n' +
         '    <span class="flag">--data-urlencode</span> <span class="str">\'agent_name=' + span(nV, ph.name) + '\'</span> \\\n' +
         '    <span class="flag">--data-urlencode</span> <span class="str">\'owner_email=' + span(eV, ph.email) + '\'</span> \\\n' +
@@ -854,9 +899,10 @@
       const eV = fE.value.trim();
       let uV = fU.value.trim().replace(/^@/, '').toLowerCase();
       const dV = fD.value.trim();
+      const kV = fK.value.trim();
       return (
         'curl -X POST \'https://provision.slate.ceo/agents\' \\\n' +
-        '    -H \'X-Api-Key: YOUR_KEY\' \\\n' +
+        '    -H \'X-Api-Key: ' + raw(kV, ph.key) + '\' \\\n' +
         '    -G \\\n' +
         '    --data-urlencode \'agent_name=' + raw(nV, ph.name) + '\' \\\n' +
         '    --data-urlencode \'owner_email=' + raw(eV, ph.email) + '\' \\\n' +
@@ -865,8 +911,74 @@
       );
     }
 
-    [fN, fE, fU, fD].forEach(function (el) {
+    [fN, fE, fU, fD, fK].forEach(function (el) {
       el.addEventListener('input', render);
+    });
+
+    const launchBtn = document.getElementById('launch-btn');
+    const launchResult = document.getElementById('launch-result');
+
+    function showResult(kind, html) {
+      launchResult.className = 'launch-result ' + kind;
+      launchResult.innerHTML = html;
+      launchResult.style.display = 'block';
+    }
+
+    launchBtn.addEventListener('click', async function () {
+      const nV = fN.value.trim();
+      const eV = fE.value.trim();
+      const uV = fU.value.trim().replace(/^@/, '').toLowerCase();
+      const dV = fD.value.trim();
+      const kV = fK.value.trim();
+
+      const missing = [];
+      if (!nV) missing.push('agent name');
+      if (!eV) missing.push('email');
+      if (!uV) missing.push('Discord username');
+      if (!dV) missing.push('mission');
+      if (!kV) missing.push('API key');
+      if (missing.length) {
+        showResult('err', 'Missing: ' + missing.join(', '));
+        return;
+      }
+
+      launchBtn.disabled = true;
+      const originalText = launchBtn.textContent;
+      launchBtn.textContent = 'Launching…';
+      showResult('', 'Provisioning… this usually takes 60–90 seconds.');
+
+      const qs = new URLSearchParams({
+        agent_name: nV,
+        owner_email: eV,
+        discord_username: uV,
+        owner_description: dV,
+      }).toString();
+
+      try {
+        const resp = await fetch('https://provision.slate.ceo/agents?' + qs, {
+          method: 'POST',
+          headers: { 'X-Api-Key': kV },
+        });
+        let body;
+        try { body = await resp.json(); } catch (_) { body = { detail: await resp.text() }; }
+        if (!resp.ok) {
+          showResult('err', 'HTTP ' + resp.status + ' — ' + (body.detail || JSON.stringify(body)));
+        } else {
+          const dm = body.dm_url ? '<a href="' + body.dm_url + '" target="_blank" rel="noopener">' + body.dm_url + '</a>' : '';
+          const oauth = body.oauth_url ? '<a href="' + body.oauth_url + '" target="_blank" rel="noopener">' + body.oauth_url + '</a>' : '';
+          showResult('ok',
+            'Provisioning ' + body.agent_name + ' (vm: ' + body.vm_name + ')\n' +
+            'Status: ' + body.status + '\n' +
+            'DM your bot: ' + dm + '\n' +
+            'Install to server (platform admin): ' + oauth
+          );
+        }
+      } catch (err) {
+        showResult('err', 'Network error: ' + err.message);
+      } finally {
+        launchBtn.disabled = false;
+        launchBtn.textContent = originalText;
+      }
     });
     copyBtn.addEventListener('click', function () {
       navigator.clipboard.writeText(rawCurl()).then(function () {
