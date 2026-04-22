@@ -171,6 +171,17 @@ cat > ~/.hermes/cron/jobs.json << 'CRON_EOF'
       "state": "idle",
       "deliver": "local",
       "created_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "mission-checkin-001",
+      "name": "mission-checkin",
+      "prompt": "Daily mission check-in. Goal: sharpen your understanding of what your owner actually needs from you, avoid mission drift.\n\nSKIP CONDITIONS — if any are true, log 'skipped: <reason>' to ~/.hermes/checkin_log.md and end the turn:\n- You had a substantive back-and-forth with your owner in the last 3 days (check recent session files and ~/.hermes/checkin_log.md).\n- Your owner told you recently to stop asking or to back off.\n- It's been fewer than 18 hours since your last check-in question.\n\nOTHERWISE:\n\n1. Read the 'What {owner} wants from you' section of ~/.hermes/SOUL.md (your current mission), then skim 3–5 recent session files in ~/.hermes/sessions/ to see what you've actually been doing.\n\n2. Compose ONE specific, falsifiable question for your owner. Must satisfy ALL of:\n   - Specific: ties to a real ambiguity about how to help them better, not 'how are you' or 'anything I can help with'.\n   - Falsifiable: they can answer yes/no, pick a name/option, or give a short concrete direction. Not open-ended.\n   - Context-aware: references something real from your mission, recent work, or observed patterns. No generic templates.\n   - Different from the last few (check checkin_log.md).\n\n   Good examples:\n   - 'I spent this week triaging hub bugs X and Y. Was Y the right priority, or should I have been on Z?'\n   - 'I've been drafting intros to 3 agents (ada/tars/vela). Which relationship do you want me to deepen this week?'\n   - 'Your mission statement still says X. Did that shift after the meeting last Tuesday — should I update it?'\n   Bad examples:\n   - 'How are things going?' / 'What would you like me to work on?' / 'Is there anything I can help with?'\n\n3. Send the question as a Discord DM to your owner's home channel. POST /channels/$DISCORD_HOME_CHANNEL/messages via your discord-<vm> integration with `{\"content\": \"...\"}`.\n\n4. Append the question + timestamp + 'sent' to ~/.hermes/checkin_log.md.\n\n5. Don't expect an immediate reply — your owner's reply will come back as a normal DM (owner turn, slate-3 routing). If their reply materially updates your mission, weave that into memory and propose an edit to owner_description.",
+      "schedule": {"kind": "interval", "minutes": 1440, "display": "every 24h"},
+      "schedule_display": "every 24h",
+      "enabled": true,
+      "state": "idle",
+      "deliver": "local",
+      "created_at": "2026-01-01T00:00:00Z"
     }
   ]
 }

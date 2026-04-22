@@ -242,7 +242,7 @@ or Discord.
 
 {region_line}
 - Base image: `exeuntu` (Debian-ish Linux, no Dockerfile specifics)
-- HTTPS proxy: exe.dev terminates TLS for `https://{host}/` and reverse-proxies to **port `8000`** on this VM (this is configured explicitly via `ssh exe.dev share port {vm_name} 8000`).
+- HTTPS proxy: exe.dev terminates TLS for `https://{host}/` and reverse-proxies to **port `8000`** on this VM. Port 8000 is exe.dev's default public port for the exeuntu base image (set at VM-creation time, no `share port` call needed). A fresh VM has nothing actually listening on 8000 until something binds there; on this VM, the managed `www.service` does.
 - Alt ports: exe.dev transparently forwards TCP 3000–9999 as `https://{host}:<port>/`, but **alt-port URLs require an exe.dev login** — only port 8000 (the configured public port) is open to the world. So services on 8001/8080/etc. are effectively *private to platform users*, not public.
 - Self-loop: you **cannot `curl https://{host}/` from inside this VM** — exe.dev's network topology doesn't route the public hostname back to the VM. To test locally, use `http://127.0.0.1:8000/`.
 - Private IP: each VM has a private `10.x.x.x` address reachable only from itself. No cross-VM networking.
