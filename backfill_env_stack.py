@@ -149,20 +149,39 @@ if ! grep -q '^<!-- BEGIN_ENV_AUTOGEN -->' "$TMP"; then
     exit 2
 fi
 python3 - "$SOUL" "$TMP" <<'PY'
-import re, sys
+import difflib, os, re, sys, time
 from pathlib import Path
 soul_path = Path(sys.argv[1])
-block = Path(sys.argv[2]).read_text()
+incoming = Path(sys.argv[2]).read_text()
 BEGIN, END = "<!-- BEGIN_ENV_AUTOGEN -->", "<!-- END_ENV_AUTOGEN -->"
 soul = soul_path.read_text() if soul_path.exists() else ""
 pat = re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?"
-if re.search(pat, soul, re.DOTALL):
-    new = re.sub(pat, block, soul, count=1, flags=re.DOTALL)
+m = re.search(pat, soul, re.DOTALL)
+existing_block = m.group(0) if m else ""
+if existing_block and existing_block != incoming:
+    log_path = Path(os.path.expanduser("~/.hermes/platform_edits_log.md"))
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    diff = "\n".join(difflib.unified_diff(
+        existing_block.splitlines(), incoming.splitlines(),
+        fromfile="your_edit", tofile="canonical", lineterm="", n=2,
+    ))
+    entry = (
+        f"\n## {ts} — autogen block reverted\n\n"
+        "refresh-env.timer detected your edits inside the auto-gen markers "
+        "and restored the canonical block. Edits to that region don't "
+        "persist — if something there is wrong, tell your owner and fix "
+        "the platform generator (env_block.py). Diff of what was wiped:\n\n"
+        f"```diff\n{diff}\n```\n"
+    )
+    with open(log_path, "a") as f:
+        f.write(entry)
+if m:
+    new = re.sub(pat, incoming, soul, count=1, flags=re.DOTALL)
 else:
-    new = (soul.rstrip() + "\n\n" + block) if soul else block
+    new = (soul.rstrip() + "\n\n" + incoming) if soul else incoming
 if new != soul:
     soul_path.write_text(new)
-    print(f"refresh-env: block updated ({len(block)} chars)")
+    print(f"refresh-env: block updated ({len(incoming)} chars)")
 else:
     print("refresh-env: block unchanged")
 PY

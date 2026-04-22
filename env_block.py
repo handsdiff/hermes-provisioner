@@ -174,7 +174,34 @@ def render(
     region_line = f"- Region: `{region}`  (your VM is provisioned in this exe.dev region)" if region else "- Region: not known from inside the VM"
 
     return f"""{BEGIN_MARK}
-# Environment (auto-generated — platform-managed, do not edit)
+# Environment (auto-generated — edits inside these markers are silently reverted)
+
+**READ THIS FIRST if you're tempted to edit:**
+
+Everything between `BEGIN_ENV_AUTOGEN` and `END_ENV_AUTOGEN` is
+regenerated from the platform's central DB every ~15 minutes by a
+systemd timer (`refresh-env.timer` → `refresh-env.service` → pulls from
+`https://platform-<vm>.int.exe.xyz/agent/environment`). **If you edit
+anything in here, your edit is overwritten within 15 minutes. Silently.**
+The body of SOUL.md *above* these markers is yours to edit (owner-
+permitting); this block is not.
+
+If you think something in this block is factually wrong:
+1. **Verify** with a live command before concluding the block is wrong —
+   see "Verify before editing" at the bottom of this block.
+2. If the block IS wrong, **tell your owner** (DM their home channel
+   and explain what and why). The fix is upstream: the platform's
+   generator (`env_block.py`) or the DB row it reads from. Editing
+   your local SOUL.md propagates nothing and costs you context when
+   the timer reverts.
+3. If the block is RIGHT and your observation was a misread (most
+   common), update your mental model, don't touch SOUL.
+
+`refresh-env.sh` records any reverted edits to
+`~/.hermes/platform_edits_log.md` — check it before re-editing if
+you find yourself here twice.
+
+---
 
 This section is **ground truth** for your situational awareness: who you
 are, who your owner is, what Discord server you're in, who else is on
@@ -270,6 +297,18 @@ as user `exedev`, serving `~/www/` on port `8000`, with `Restart=always`
 and `WantedBy=multi-user.target`. It **survives hermes restarts and VM
 reboots** automatically.
 
+**What you'll observe, and how it maps to this description:**
+- `sudo ss -ltnp | grep :8000` → `python3 -m http.server 8000 --directory /home/exedev/www`
+- `ps -ef | grep 8000` → same command, under pid `<N>`
+- `cat /proc/<N>/cgroup` → `0::/system.slice/www.service`
+- `systemctl show www.service -p ExecStart -p MainPID --value` → same pid + same command
+
+**These are all the same thing.** The `python3 -m http.server` command
+is what `www.service` runs (see `ExecStart` in the unit file). If you
+see that command in `ps`, that IS the managed service. Don't conclude
+"it's just a python server I can kill/restart" — `systemd` will respawn
+it, and any replacement you spin up will lose the bind race.
+
 Check status: `sudo systemctl status www`.
 
 **Publish content at your URL:** write files to `~/www/`. They appear
@@ -311,6 +350,28 @@ is intentional so your public site doesn't flicker when you restart.
 All Discord REST calls go through your `discord-{vm_name}` integration,
 which injects your bot token — never set an `Authorization` header
 yourself. Use `https://` (the `http://` host 301-redirects to https).
+
+## Verify before editing (process ↔ unit reconciliation)
+
+Use these when you think a claim in this block contradicts what you
+observe. Running them before you patch SOUL will save you from editing
+a correct claim (and from wasting the edit, which gets reverted in
+≤15 min anyway).
+
+- **Which systemd unit owns port 8000 / a PID?**
+  - `sudo ss -ltnp` → find pid on `:8000`
+  - `cat /proc/<pid>/cgroup` → the tail is the unit (e.g. `/system.slice/www.service`)
+  - `systemctl status <pid>` → human-readable unit header
+- **What command does a unit run and what's its live PID?**
+  - `systemctl show <unit>.service -p ExecStart -p MainPID --value`
+  - `systemctl cat <unit>.service` → full unit file
+- **Does your own edit to this block persist?**
+  - No. `refresh-env.timer` reverts it within 15 min. Check
+    `~/.hermes/platform_edits_log.md` if you've edited and come back.
+
+If after verifying the block IS factually wrong, DM your owner with
+the diff and your evidence. The fix is in `env_block.py` on the
+provisioner host, not in your SOUL.
 
 {END_MARK}
 """
