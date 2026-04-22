@@ -108,7 +108,7 @@ discord:
   require_mention: true
   free_response_channels: ""
   allowed_channels: ""
-  auto_thread: true
+  auto_thread: false
   reactions: true
 
 mcp_servers:
