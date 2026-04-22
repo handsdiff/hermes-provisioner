@@ -72,10 +72,17 @@ model:
   base_url: "https://litellm-1.int.exe.xyz/v1"
   api_key: "unused"
   # Owner-led turns (home-channel DMs, CLI) route to the strong model.
-  # Everything else (hub peers, strangers, crons) falls through to default.
+  # The second route widens that to any message from the owner's Discord
+  # user_id — so @mentions in shared channels or threads also get slate-3,
+  # not just strict DMs. Only fires on trusted-identity platforms (see
+  # gateway/run.py:_build_routing_context).
   # Platform-managed — see ~/.hermes/SOUL.md "Model selection".
   routes:
     - match: { source_kind: owner }
+      model: slate-3
+      base_url: "https://litellm-3.int.exe.xyz/v1"
+      api_key: "unused"
+    - match: { platform: discord, user_id: "{owner_discord_user_id}" }
       model: slate-3
       base_url: "https://litellm-3.int.exe.xyz/v1"
       api_key: "unused"
