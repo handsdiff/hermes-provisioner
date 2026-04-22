@@ -101,6 +101,28 @@ def open_dm_channel(bot_token: str, user_id: str) -> str:
     return str(r.json()["id"])
 
 
+def send_dm_message(bot_token: str, channel_id: str, content: str) -> None:
+    """Send a message from this bot into an already-open DM channel.
+
+    Used to greet the owner at provision time — bot→user direction works
+    without a shared guild, so this lands even before the owner has
+    clicked the OAuth install link. Raises DiscordAdminError on non-2xx;
+    callers that want non-fatal behavior should catch it.
+    """
+    r = httpx.post(
+        f"{_DISCORD_API}/channels/{channel_id}/messages",
+        headers={"Authorization": f"Bot {bot_token}",
+                 "Content-Type": "application/json"},
+        json={"content": content},
+        timeout=15.0,
+    )
+    if r.status_code not in (200, 201):
+        raise DiscordAdminError(
+            f"Discord send_dm_message failed for channel_id={channel_id}: "
+            f"HTTP {r.status_code} {r.text[:200]}"
+        )
+
+
 def rename_bot(bot_token: str, new_name: str) -> str:
     """Rename a bot via PATCH /users/@me. Returns the bot's user_id
     (which equals its application client_id for bot accounts).
@@ -131,7 +153,7 @@ def rename_bot(bot_token: str, new_name: str) -> str:
 
 
 def notify_admin_install_pending(
-    agent_name: str, vm_name: str, oauth_url: str, dm_url: str
+    agent_name: str, vm_name: str, oauth_url: str
 ) -> None:
     """DM the platform admin from Sal when a new agent's bot needs the
     OAuth install click. Non-fatal — logs and returns on any failure so
@@ -153,8 +175,7 @@ def notify_admin_install_pending(
         channel_id = r.json()["id"]
         content = (
             f"New agent **{agent_name}** provisioned on `{vm_name}`.\n"
-            f"Click to add the bot to the Slate guild: {oauth_url}\n"
-            f"Owner DM URL (to pass along): {dm_url}"
+            f"Click to add the bot to the Slate guild: {oauth_url}"
         )
         r2 = httpx.post(
             f"{_DISCORD_API}/channels/{channel_id}/messages",

@@ -28,6 +28,7 @@ from discord_admin import (
     open_dm_channel,
     rename_bot,
     resolve_discord_user_id,
+    send_dm_message,
 )
 
 
@@ -365,6 +366,25 @@ def prepare_agent(name, email, discord_username, display_name="", vm_name="",
               "run backfill_discord_home_channel.py later to fix.")
         dm_channel_id = ""
 
+    # Greet the owner from the newly-claimed bot. bot→user works even
+    # without a shared guild, so this lands immediately — and the install
+    # link is the thing the owner has to click before user→bot DMs work.
+    # Non-fatal: a failed send leaves the owner without the nudge but
+    # doesn't roll back provisioning.
+    if dm_channel_id:
+        greeting = (
+            f"Hi {owner_name} — I'm **{display_name}**, your new agent. "
+            f"I'm spinning up now (a few more minutes before I'm fully online). "
+            f"You'll be able to DM me back here once a Slate admin adds me to the server."
+        )
+        if owner_description:
+            greeting += f"\n\nOnce I'm live, I'll pick up where you left off: *{owner_description}*"
+        try:
+            send_dm_message(bot_token, dm_channel_id, greeting)
+            print("  Sent welcome DM to owner")
+        except DiscordAdminError as e:
+            print(f"  WARNING: welcome DM send failed ({e}). Non-fatal.")
+
     return {
         "hub_agent_id": hub_agent_id,
         "hub_secret": hub_secret,
@@ -562,7 +582,7 @@ def provision_agent(name, email, vm_name, display_name, prep):
     # DM the platform admin so they can click the OAuth install URL.
     # Non-fatal — see notify_admin_install_pending docstring.
     print("Notifying platform admin via Discord DM...")
-    notify_admin_install_pending(display_name, vm_name, oauth_url, dm_url)
+    notify_admin_install_pending(display_name, vm_name, oauth_url)
 
     return {
         "name": name,
