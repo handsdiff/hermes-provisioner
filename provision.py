@@ -25,6 +25,7 @@ from db import (
 from discord_admin import (
     DiscordAdminError,
     notify_admin_install_pending,
+    open_dm_channel,
     rename_bot,
     resolve_discord_user_id,
 )
@@ -339,12 +340,29 @@ def prepare_agent(name, email, discord_username, display_name="", vm_name=""):
     save_service_token(vm_name, "discord", bot_token)
     print("  Agent record + bot token saved to DB")
 
+    # 5. Resolve the bot↔owner DM channel.id. Discord DM channel IDs are
+    # distinct snowflakes from user IDs — this is what _is_owner_source
+    # compares against to classify owner turns (route to slate-3, init
+    # AIAgent with user_id=None). Non-fatal: a failure here leaves
+    # DISCORD_HOME_CHANNEL empty in .env so the classifier short-circuits
+    # gracefully; backfill can fix it later.
+    print("Opening bot↔owner DM channel...")
+    try:
+        dm_channel_id = open_dm_channel(bot_token, owner_discord_user_id)
+        print(f"  DM channel.id={dm_channel_id}")
+    except DiscordAdminError as e:
+        print(f"  WARNING: open_dm_channel failed ({e}). "
+              "Agent will ship with DISCORD_HOME_CHANNEL empty — "
+              "run backfill_discord_home_channel.py later to fix.")
+        dm_channel_id = ""
+
     return {
         "hub_agent_id": hub_agent_id,
         "hub_secret": hub_secret,
         "owner_name": owner_name,
         "owner_discord_username": owner_discord_username,
         "owner_discord_user_id": owner_discord_user_id,
+        "owner_discord_dm_channel_id": dm_channel_id,
         "bot_client_id": client_id,
         "bot_token": bot_token,
     }
@@ -478,6 +496,7 @@ def provision_agent(name, email, vm_name, display_name, prep):
         .replace("{owner_email}", email)
         .replace("{owner_name}", owner_name or email)
         .replace("{owner_discord_user_id}", owner_discord_user_id)
+        .replace("{owner_discord_dm_channel_id}", prep.get("owner_discord_dm_channel_id", ""))
     )
     ssh_vm(vm_name, script, timeout=600)
 

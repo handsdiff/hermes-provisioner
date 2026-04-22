@@ -124,13 +124,17 @@ CFGEOF
 # --- 5. Write .env ---
 # DISCORD_BOT_TOKEN is a placeholder — the real bot token lives server-side
 # in agent_service_tokens and is stamped into IDENTIFY frames by dg-proxy.
-# DISCORD_HOME_CHANNEL is the owner's Discord user_id, resolved from their
-# Discord username during provisioning via Sal + members/search.
+# DISCORD_HOME_CHANNEL is the bot↔owner DM channel.id (a distinct snowflake
+# from the owner's user_id), resolved via POST /users/@me/channels during
+# provisioning. _is_owner_source in gateway/run.py compares this against
+# inbound source.chat_id to classify owner turns → slate-3 routing + correct
+# AIAgent init. Leave blank if the provisioner couldn't resolve it; the
+# classifier short-circuits safely. Backfill via backfill_discord_home_channel.py.
 cat > ~/.hermes/.env << ENVEOF
 GATEWAY_ALLOW_ALL_USERS=true
 SUDO_PASSWORD=
 DISCORD_BOT_TOKEN=proxy-managed-{vm_name}
-DISCORD_HOME_CHANNEL={owner_discord_user_id}
+DISCORD_HOME_CHANNEL={owner_discord_dm_channel_id}
 ENVEOF
 
 # --- 6. Seed discovery cron ---

@@ -73,6 +73,34 @@ def resolve_discord_user_id(username: str) -> dict | None:
     return None
 
 
+def open_dm_channel(bot_token: str, user_id: str) -> str:
+    """Open (or resolve) the DM channel between this bot and a user.
+
+    Returns the DM channel's snowflake id. The endpoint is idempotent —
+    if a DM channel already exists it's returned as-is, otherwise Discord
+    creates one silently (no user-visible notification until a message is
+    actually sent). A shared guild is NOT required to create the channel
+    record; only sending messages through it later may fail without one.
+
+    Raises DiscordAdminError on non-2xx. The most useful failure is
+    HTTP 400 + code 50033 ("Invalid Recipient(s)"), which means the
+    user_id doesn't exist.
+    """
+    r = httpx.post(
+        f"{_DISCORD_API}/users/@me/channels",
+        headers={"Authorization": f"Bot {bot_token}",
+                 "Content-Type": "application/json"},
+        json={"recipient_id": str(user_id)},
+        timeout=15.0,
+    )
+    if r.status_code not in (200, 201):
+        raise DiscordAdminError(
+            f"Discord open_dm_channel failed for user_id={user_id}: "
+            f"HTTP {r.status_code} {r.text[:200]}"
+        )
+    return str(r.json()["id"])
+
+
 def rename_bot(bot_token: str, new_name: str) -> str:
     """Rename a bot via PATCH /users/@me. Returns the bot's user_id
     (which equals its application client_id for bot accounts).
