@@ -248,7 +248,8 @@ def save_agent_record(name, hub_secret, telegram_bot_token="",
                       owner_telegram_user_id="",
                       owner_discord_username="",
                       owner_discord_user_id="",
-                      bot_client_id=""):
+                      bot_client_id="",
+                      owner_description=""):
     """Save agent record to the database."""
     save_agent(name, hub_secret, telegram_bot_token,
                vm_name=vm_name, display_name=display_name,
@@ -256,13 +257,15 @@ def save_agent_record(name, hub_secret, telegram_bot_token="",
                owner_telegram_user_id=owner_telegram_user_id,
                owner_discord_username=owner_discord_username,
                owner_discord_user_id=owner_discord_user_id,
-               bot_client_id=bot_client_id)
+               bot_client_id=bot_client_id,
+               owner_description=owner_description)
 
 
 SETUP_SCRIPT = (Path(__file__).parent / "setup.sh").read_text()
 
 
-def prepare_agent(name, email, discord_username, display_name="", vm_name=""):
+def prepare_agent(name, email, discord_username, display_name="", vm_name="",
+                  owner_description=""):
     """Fast pre-checks for Discord-first provisioning.
 
     Resolves the owner's Discord user_id against the Slate guild, claims
@@ -270,6 +273,11 @@ def prepare_agent(name, email, discord_username, display_name="", vm_name=""):
     synchronous so failures (user not in Slate, empty pool, rename rate
     limit) return immediately to the API caller instead of a silent
     background blowup.
+
+    `owner_description` is the free-text answer to onboarding's "what
+    would you love your agent to do?" — stored in the agents table and
+    woven into the agent's SOUL.md at provision time to give it direction
+    out of the gate.
 
     Returns a context dict consumed by `provision_agent()`.
     """
@@ -336,6 +344,7 @@ def prepare_agent(name, email, discord_username, display_name="", vm_name=""):
         owner_discord_username=owner_discord_username,
         owner_discord_user_id=owner_discord_user_id,
         bot_client_id=client_id,
+        owner_description=owner_description,
     )
     save_service_token(vm_name, "discord", bot_token)
     print("  Agent record + bot token saved to DB")
@@ -363,6 +372,7 @@ def prepare_agent(name, email, discord_username, display_name="", vm_name=""):
         "owner_discord_username": owner_discord_username,
         "owner_discord_user_id": owner_discord_user_id,
         "owner_discord_dm_channel_id": dm_channel_id,
+        "owner_description": owner_description,
         "bot_client_id": client_id,
         "bot_token": bot_token,
     }
@@ -488,6 +498,29 @@ def provision_agent(name, email, vm_name, display_name, prep):
 
     # 14. Run setup
     print("Running setup (this takes a few minutes)...")
+    # Turn the raw owner_description into a "mission" paragraph the SOUL
+    # template injects verbatim. Phrasing is neutral about source because the
+    # description may be (a) user-provided at onboarding or (b) platform-seeded
+    # for agents provisioned before the intake question existed.
+    desc = (prep.get("owner_description") or "").strip()
+    if desc:
+        owner_description_block = (
+            f"Your mission, as known to the platform:\n\n"
+            f"> \"{desc}\"\n\n"
+            "This is your north star. Everything else in this SOUL is "
+            "supporting infrastructure — habits, platform rules, environment "
+            "facts. If the mission above feels stale, incomplete, or off, "
+            "raise it with your owner: getting their explicit confirmation "
+            "keeps you aligned and makes you better able to help them."
+        )
+    else:
+        owner_description_block = (
+            "The platform doesn't have an explicit mission statement from "
+            "your owner yet. Your job is to learn what they care about, "
+            "surface useful things (people, ideas, drafts, prototypes), and "
+            "propose directions they can react to — don't stay idle waiting "
+            "to be told. Ask them directly when you have a clarifying question."
+        )
     script = (
         SETUP_SCRIPT
         .replace("{display_name}", display_name)
@@ -497,6 +530,7 @@ def provision_agent(name, email, vm_name, display_name, prep):
         .replace("{owner_name}", owner_name or email)
         .replace("{owner_discord_user_id}", owner_discord_user_id)
         .replace("{owner_discord_dm_channel_id}", prep.get("owner_discord_dm_channel_id", ""))
+        .replace("{owner_description_block}", owner_description_block)
     )
     ssh_vm(vm_name, script, timeout=600)
 

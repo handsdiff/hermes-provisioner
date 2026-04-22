@@ -37,6 +37,7 @@ from provision import (
 
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 PROVISIONER_ADMIN_KEY = os.environ.get("PROVISIONER_ADMIN_KEY", "")
+CREATION_API_KEY = os.environ.get("CREATION_API_KEY", "")
 
 app = FastAPI()
 
@@ -53,6 +54,13 @@ def _check_admin(api_key: str | None):
         raise HTTPException(status_code=500, detail="PROVISIONER_ADMIN_KEY not configured")
     if api_key != PROVISIONER_ADMIN_KEY:
         raise HTTPException(status_code=401, detail="Admin API key required")
+
+
+def _check_creation(api_key: str | None):
+    if not CREATION_API_KEY:
+        raise HTTPException(status_code=500, detail="CREATION_API_KEY not configured")
+    if api_key != CREATION_API_KEY and api_key != PROVISIONER_ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Creation API key required")
 
 
 def _validate_name(name: str):
@@ -91,6 +99,39 @@ def health():
     return {"ok": True}
 
 
+@app.get("/agent/environment")
+def agent_environment(
+    x_agent_secret: str = Header(None, alias="X-Agent-Secret"),
+):
+    """Server-rendered SOUL environment block for the calling VM.
+
+    Auth: X-Agent-Secret header (the same secret injected by the
+    `platform-<vm>` exe.dev integration). A VM can only fetch its own
+    environment — this lets the roster be fresh without making peer
+    rosters globally enumerable by anyone who guesses a vm_name.
+
+    Computed from current DB state on every request — so changes to the
+    agents table (new peers, updated owner descriptions, renamed bots)
+    are reflected immediately. VMs pull this via a 15-minute systemd
+    timer and splice it into their SOUL.md between auto-gen markers.
+
+    Response: text/markdown. Returns 401 on missing/bad secret, 404 if
+    the agent's row has been removed.
+    """
+    from fastapi.responses import PlainTextResponse
+    from env_block import render_for_vm
+    if not x_agent_secret:
+        raise HTTPException(status_code=401, detail="X-Agent-Secret header required")
+    vm_name = vm_for_agent_secret(x_agent_secret)
+    if not vm_name:
+        raise HTTPException(status_code=401, detail="Invalid X-Agent-Secret")
+    try:
+        block = render_for_vm(vm_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return PlainTextResponse(block, media_type="text/markdown")
+
+
 @app.get("/humans")
 def list_humans():
     """Platform roster: humans on the platform and their hub agents.
@@ -107,14 +148,24 @@ def create_agent(
     agent_name: str,
     owner_email: str,
     discord_username: str,
+    owner_description: str = "",
     x_api_key: str = Header(None, alias="X-Api-Key"),
 ):
-    _check_auth(x_api_key)
+    """Create an agent. `owner_description` is the free-text answer to the
+    onboarding intake ("what would you love your agent to do?"). Used to
+    seed the agent's SOUL.md with direction and surfaced to peer agents
+    via /humans so they can describe each other to their owners.
+    """
+    _check_creation(x_api_key)
     _validate_name(agent_name)
     name = agent_name.lower()
     vm_name = _vm_name(agent_name)
     if get_agent(name):
         raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
+
+    owner_description = (owner_description or "").strip()
+    if len(owner_description) > 600:
+        raise HTTPException(status_code=400, detail="owner_description must be ≤ 600 chars")
 
     # Synchronous pre-checks: resolve Discord username, claim bot from
     # pool + rename it, register on Hub. Any failure (owner not in Slate
@@ -123,6 +174,7 @@ def create_agent(
         prep = prepare_agent(
             name, owner_email, discord_username,
             display_name=agent_name, vm_name=vm_name,
+            owner_description=owner_description,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

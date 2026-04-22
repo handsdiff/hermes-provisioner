@@ -105,6 +105,13 @@ def _connect() -> sqlite3.Connection:
             con.execute(f'ALTER TABLE agents ADD COLUMN {col} TEXT DEFAULT ""')
         except sqlite3.OperationalError:
             pass
+    # Free-text "what would you love your agent to do?" captured at onboarding.
+    # Used by the agent's SOUL to seed mission/direction, and by peer agents
+    # so they can describe each other to their owners.
+    try:
+        con.execute('ALTER TABLE agents ADD COLUMN owner_description TEXT DEFAULT ""')
+    except sqlite3.OperationalError:
+        pass
     con.commit()
     return con
 
@@ -115,15 +122,17 @@ def save_agent(name: str, hub_secret: str, telegram_bot_token: str = "",
                owner_telegram_user_id: str = "",
                owner_discord_username: str = "",
                owner_discord_user_id: str = "",
-               bot_client_id: str = ""):
+               bot_client_id: str = "",
+               owner_description: str = ""):
     """Insert or update an agent record."""
     con = _connect()
     con.execute(
         """INSERT INTO agents (name, vm_name, display_name, owner_email,
                owner_telegram, owner_telegram_user_id,
                owner_discord_username, owner_discord_user_id, bot_client_id,
+               owner_description,
                hub_secret, telegram_bot_token, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning')
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning')
            ON CONFLICT(name) DO UPDATE SET
                vm_name=excluded.vm_name,
                display_name=excluded.display_name,
@@ -133,13 +142,14 @@ def save_agent(name: str, hub_secret: str, telegram_bot_token: str = "",
                owner_discord_username=excluded.owner_discord_username,
                owner_discord_user_id=excluded.owner_discord_user_id,
                bot_client_id=excluded.bot_client_id,
+               owner_description=excluded.owner_description,
                hub_secret=excluded.hub_secret,
                telegram_bot_token=excluded.telegram_bot_token,
                status='provisioning',
                error=''""",
         (name, vm_name, display_name, owner_email, owner_telegram,
          owner_telegram_user_id, owner_discord_username, owner_discord_user_id,
-         bot_client_id, hub_secret, telegram_bot_token),
+         bot_client_id, owner_description, hub_secret, telegram_bot_token),
     )
     con.commit()
     con.close()
@@ -196,7 +206,8 @@ def all_humans() -> list[dict]:
     con = _connect()
     rows = con.execute(
         """SELECT name, display_name, owner_email,
-                  owner_discord_username, owner_discord_user_id
+                  owner_discord_username, owner_discord_user_id,
+                  owner_description
            FROM agents
            WHERE status = 'ready'
            ORDER BY name"""
@@ -207,6 +218,7 @@ def all_humans() -> list[dict]:
             "owner_email": r["owner_email"] or "",
             "owner_discord_username": r["owner_discord_username"] or "",
             "owner_discord_user_id": r["owner_discord_user_id"] or "",
+            "owner_description": r["owner_description"] or "",
             "hub_agent": r["name"],
             "display_name": r["display_name"] or r["name"],
         }

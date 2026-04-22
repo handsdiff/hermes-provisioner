@@ -183,13 +183,18 @@ cat > ~/.hermes/SOUL.md << EOF
 You are **$AGENT_NAME** — a proactive representative of your owner's work.
 Your owner is **{owner_name}** ({owner_email}).
 
+## What {owner_name} wants from you
+
+{owner_description_block}
+
 You are not a passive assistant waiting for instructions. You explore on your
 own, make friends with other agents, discover problems worth solving, build
 products to solve them, and iterate when your hypotheses turn out wrong.
 You reflect your owner's values while developing your own identity and
-relationships over time.
+relationships over time. The mission above is the north star; the habits
+below are how to pursue it.
 
-## What you should be doing
+## How to pursue it
 
 - **Discover and collaborate.** Find agents on Hub that share relevant goals.
   Help them with theirs, ask for help with yours. Onboard new agents to the
@@ -421,5 +426,113 @@ SVCEOF
 sudo systemctl daemon-reload
 sudo systemctl enable hermes
 sudo systemctl start hermes
+
+# --- 9. Managed static web server on port 8000 (serves ~/www/) ---
+# Decoupled from hermes.service — public URL stays up across agent restarts
+# and VM reboots. Agent writes files to ~/www/ to publish content.
+mkdir -p ~/www
+if [ ! -f ~/www/index.html ]; then
+cat > ~/www/index.html << 'WWWEOF'
+<!doctype html>
+<html><head><meta charset=utf-8><title>{display_name}</title></head>
+<body><h1>{display_name}</h1><p>Write files to <code>~/www/</code> and they appear here.</p></body>
+</html>
+WWWEOF
+fi
+
+sudo tee /etc/systemd/system/www.service > /dev/null << WWWSVCEOF
+[Unit]
+Description=Static web server (~/www on port 8000, reverse-proxied by exe.dev)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=exedev
+WorkingDirectory=/home/exedev/www
+ExecStart=/usr/bin/python3 -m http.server 8000 --directory /home/exedev/www
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+WWWSVCEOF
+sudo systemctl enable --now www.service
+
+# --- 10. Env-block refresh timer (keeps SOUL.md's auto-gen section fresh) ---
+# Pulls the current environment block from the provisioner every 15 minutes.
+# The block is the single source of truth for identity / peers / server state;
+# keeping it fresh means the agent's situational awareness survives new
+# humans/agents joining the platform without re-provisioning.
+cat > ~/bin/refresh-env.sh << 'REFRESHEOF'
+#!/bin/bash
+set -euo pipefail
+VM_NAME=$(hostname -s)
+ENDPOINT="https://platform-${VM_NAME}.int.exe.xyz/agent/environment"
+SOUL=~/.hermes/SOUL.md
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+if ! curl -sS --max-time 15 -f -o "$TMP" "$ENDPOINT"; then
+    echo "refresh-env: $ENDPOINT failed; leaving SOUL untouched" >&2
+    exit 1
+fi
+if ! grep -q '^<!-- BEGIN_ENV_AUTOGEN -->' "$TMP"; then
+    echo "refresh-env: endpoint returned content without BEGIN marker; aborting" >&2
+    exit 2
+fi
+python3 - "$SOUL" "$TMP" <<'PY'
+import re, sys
+from pathlib import Path
+soul_path = Path(sys.argv[1])
+block = Path(sys.argv[2]).read_text()
+BEGIN, END = "<!-- BEGIN_ENV_AUTOGEN -->", "<!-- END_ENV_AUTOGEN -->"
+soul = soul_path.read_text() if soul_path.exists() else ""
+pat = re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?"
+if re.search(pat, soul, re.DOTALL):
+    new = re.sub(pat, block, soul, count=1, flags=re.DOTALL)
+else:
+    new = (soul.rstrip() + "\n\n" + block) if soul else block
+if new != soul:
+    soul_path.write_text(new)
+    print(f"refresh-env: block updated ({len(block)} chars)")
+else:
+    print("refresh-env: block unchanged")
+PY
+REFRESHEOF
+chmod +x ~/bin/refresh-env.sh
+
+sudo tee /etc/systemd/system/refresh-env.service > /dev/null << REFRSVCEOF
+[Unit]
+Description=Refresh auto-gen environment block in ~/.hermes/SOUL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=exedev
+ExecStart=/home/exedev/bin/refresh-env.sh
+
+[Install]
+WantedBy=multi-user.target
+REFRSVCEOF
+
+sudo tee /etc/systemd/system/refresh-env.timer > /dev/null << REFRTIMEREOF
+[Unit]
+Description=Refresh env block every 15 minutes
+Requires=refresh-env.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+REFRTIMEREOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now refresh-env.timer
+# First run now so SOUL gets the env block immediately (not in 2 min).
+# Non-fatal: if it fails, timer will retry shortly.
+~/bin/refresh-env.sh || echo "refresh-env: first run deferred to timer"
 
 echo "--- Setup complete ---"
